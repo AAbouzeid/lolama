@@ -298,7 +298,7 @@ def create_config_from_hf(
 
 def load_model(
     model_name_or_path: str,
-    device: str = "cpu",
+    device: str | None = None,
     dtype: torch.dtype = torch.float16,
     compile_model: bool = False,
 ) -> Llama:
@@ -306,13 +306,18 @@ def load_model(
 
     Args:
         model_name_or_path: HuggingFace model name or local path
-        device: Device to load on
+        device: Device to load on (default: auto-detect best available)
         dtype: Model dtype (default: float16 to match HF models)
         compile_model: If True, use torch.compile() for speedup (requires PyTorch 2.0+)
 
     Returns:
         Llama model with loaded weights
     """
+    from ..utils.device import resolve_device
+
+    if device is None:
+        device = resolve_device()
+
     logger.info(f"Loading model: {model_name_or_path}")
 
     source = resolve_model_source(model_name_or_path)
@@ -338,7 +343,7 @@ def load_model(
     with torch.device('meta'):
         our_model = Llama(config, init_weights=False)
 
-    # Materialize empty tensors on CPU with target dtype
+    # Materialize on CPU first (HF weights load to CPU), then move to target device
     our_model = our_model.to_empty(device='cpu').to(dtype)
 
     # Re-initialize RoPE buffers (meta device doesn't compute them)
@@ -370,8 +375,10 @@ def load_model(
                 local_files_only=False,
             )
 
-    logger.info(f"Moving model to {device}...")
-    our_model = our_model.to(device)
+    # Move to target device (skip if already on CPU)
+    if device != "cpu":
+        logger.info(f"Moving model to {device}...")
+        our_model = our_model.to(device)
 
     # Optional: torch.compile() for speedup (PyTorch 2.0+)
     if compile_model:
