@@ -90,11 +90,17 @@ class Llama(nn.Module):
             for _ in range(self.config.num_layers)
         ]
     
-    def forward(self, input_ids, kv_caches: Optional[List[KVCache]] = None):
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        kv_caches: Optional[List[KVCache]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ):
         """
         Args:
             input_ids: (B, L) input token IDs
             kv_caches: Optional List[KVCache] for generation (updated in-place)
+            attention_mask: Optional (B, L) mask with 1=real token, 0=padding
         
         Returns:
             logits: (B, L, vocab_size)
@@ -102,10 +108,9 @@ class Llama(nn.Module):
         x = self.embed_tokens(input_ids)
         
         # Transformer layers (KV caches updated in-place)
-        # Causal masking handled by Flash Attention's is_causal flag
         for i, layer in enumerate(self.layers):
             layer_cache = kv_caches[i] if kv_caches is not None else None
-            x = layer(x, self.cos, self.sin, kv_cache=layer_cache)
+            x = layer(x, self.cos, self.sin, kv_cache=layer_cache, attention_mask=attention_mask)
         
         x = self.norm(x)
         logits = self.lm_head(x)

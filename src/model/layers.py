@@ -63,12 +63,14 @@ class LlamaAttention(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         kv_cache: Optional[KVCache] = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
             x: Input tensor (B, L, d_model)
             cos, sin: RoPE frequencies from parent model
             kv_cache: Optional KVCache for generation (updated in-place)
+            attention_mask: Optional (B, L) mask with 1=attend, 0=padding
         """
         B, L, _ = x.shape
         
@@ -86,20 +88,38 @@ class LlamaAttention(nn.Module):
         if kv_cache is not None:
             K, V = kv_cache.update(K, V)
         
-        # Causal masking logic:
-        # - Prefill (L > 1): need causal mask so tokens only attend to previous positions
-        # - Generation (L == 1 with cache): single new token attends to all cached tokens
-        is_causal = (L > 1)
-        
         # Expand K/V heads for GQA
         K = repeat_kv(K, self.n_rep)
         V = repeat_kv(V, self.n_rep)
         
+        # Determine masking strategy
+        S = K.shape[2]  # Full sequence length (including cache)
+        
+        if attention_mask is not None:
+            # Create combined causal + padding mask
+            # Causal: position i can attend to j where j <= i
+            causal_mask = torch.tril(torch.ones(L, S, device=x.device, dtype=torch.bool))
+            
+            # Padding mask: (B, S) -> (B, 1, 1, S) for broadcasting
+            # attention_mask has 1=attend, 0=padding
+            padding_mask = attention_mask[:, None, None, :].bool()
+            
+            # Combine: attend only if causal allows AND not padding
+            # Shape: (B, 1, L, S)
+            combined_mask = causal_mask.unsqueeze(0) & padding_mask
+            
+            # Convert to additive mask for SDPA (0=attend, -inf=mask)
+            attn_mask = torch.where(combined_mask, 0.0, float('-inf')).to(x.dtype)
+            is_causal = False  # We handle causal in the mask
+        else:
+            attn_mask = None
+            # Use is_causal only for prefill (L > 1), not for single-token generation
+            is_causal = (L > 1)
+        
         # Flash Attention via PyTorch's scaled_dot_product_attention
-        # Automatically uses Flash Attention on CUDA, memory-efficient attention elsewhere
         out = F.scaled_dot_product_attention(
             Q, K, V,
-            attn_mask=None,
+            attn_mask=attn_mask,
             is_causal=is_causal,
             dropout_p=0.0,
         )
@@ -137,9 +157,14 @@ class LlamaBlock(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         kv_cache: Optional[KVCache] = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """KV cache is updated in-place if provided."""
-        attn_out = self.attention(self.attention_norm(x), cos, sin, kv_cache=kv_cache)
+        """KV cache and attention_mask are optional."""
+        attn_out = self.attention(
+            self.attention_norm(x), cos, sin,
+            kv_cache=kv_cache,
+            attention_mask=attention_mask,
+        )
         x = x + attn_out
         x = x + self.feed_forward(self.ffn_norm(x))
         return x
