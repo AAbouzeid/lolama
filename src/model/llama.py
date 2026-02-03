@@ -8,8 +8,10 @@ import torch.nn.functional as F
 from collections.abc import Iterator
 
 from .config import LlamaConfig
+from .generation_config import GenerationConfig
 from .kv_cache import KVCache
 from .layers import LlamaBlock, RMSNorm
+from .sampler import Sampler
 from ..utils.rope import precompute_rope_frequencies
 
 
@@ -35,7 +37,7 @@ class Llama(nn.Module):
         head_dim: int = config.d_model // config.num_heads
         cos: torch.Tensor
         sin: torch.Tensor
-        cos, sin = precompute_rope_frequencies(head_dim, config.max_seq_len)
+        cos, sin = precompute_rope_frequencies(head_dim, config.max_seq_len, base=config.rope_base)
         self.register_buffer('cos', cos)
         self.register_buffer('sin', sin)
         
@@ -58,7 +60,9 @@ class Llama(nn.Module):
     def init_rope(self) -> None:
         """Re-initialize RoPE buffers. Call after materializing from meta device."""
         head_dim: int = self.config.d_model // self.config.num_heads
-        cos, sin = precompute_rope_frequencies(head_dim, self.config.max_seq_len)
+        cos, sin = precompute_rope_frequencies(
+            head_dim, self.config.max_seq_len, base=self.config.rope_base
+        )
         # Copy data to existing buffers (preserves device)
         self.cos.copy_(cos.to(self.cos.device))
         self.sin.copy_(sin.to(self.sin.device))
@@ -133,26 +137,30 @@ class Llama(nn.Module):
     def generate(
         self,
         input_ids: torch.Tensor,
-        max_new_tokens: int = 50,
-        temperature: float = 1.0,
-        top_k: int | None = None,
-        top_p: float | None = None,
-        do_sample: bool = True,
-        eos_token_id: int | None = None,
-        repetition_penalty: float = 1.0,
+        config: GenerationConfig | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         """Autoregressive text generation with pre-allocated KV cache.
         
         Args:
             input_ids: Input token IDs (B, L)
-            max_new_tokens: Number of tokens to generate
-            temperature: Sampling temperature (ignored if do_sample=False)
-            top_k: Top-k sampling (ignored if do_sample=False)
-            top_p: Nucleus sampling threshold (ignored if do_sample=False)
-            do_sample: If False, use greedy decoding (deterministic)
-            eos_token_id: Stop generation when this token is produced
-            repetition_penalty: Penalty for repeating tokens (1.0 = no penalty)
+            config: Generation configuration (preferred)
+            **kwargs: Individual parameters (for backwards compatibility):
+                max_new_tokens, temperature, top_k, top_p, do_sample,
+                eos_token_id, repetition_penalty
+        
+        Examples:
+            # Using config (recommended)
+            output = model.generate(input_ids, GenerationConfig(temperature=0.7))
+            output = model.generate(input_ids, GenerationConfig.greedy())
+            
+            # Using kwargs (backwards compatible)
+            output = model.generate(input_ids, max_new_tokens=100, temperature=0.7)
         """
+        # Build config from kwargs if not provided
+        if config is None:
+            config = GenerationConfig(**kwargs)
+        
         self.eval()
         batch_size: int = input_ids.shape[0]
         prompt_len: int = input_ids.shape[1]
@@ -163,62 +171,33 @@ class Llama(nn.Module):
         # Create pre-allocated KV cache
         kv_caches: list[KVCache] = self.create_kv_caches(
             batch_size=batch_size,
-            max_seq_len=prompt_len + max_new_tokens,
+            max_seq_len=prompt_len + config.max_new_tokens,
         )
         
-        # Initial forward pass (populates cache)
+        # Create sampler
+        sampler: Sampler = Sampler(
+            temperature=config.temperature,
+            top_k=config.top_k,
+            top_p=config.top_p,
+            do_sample=config.do_sample,
+        )
+        
         logits: torch.Tensor = self(input_ids, kv_caches=kv_caches)
         
-        for _ in range(max_new_tokens):
+        for _ in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
             
             # Apply repetition penalty
-            if repetition_penalty != 1.0:
-                for i in range(batch_size):
-                    for token_id in input_ids[i].unique():
-                        next_logits[i, token_id] /= repetition_penalty
+            Sampler.apply_repetition_penalty(next_logits, input_ids, config.repetition_penalty)
             
-            next_token: torch.Tensor
-            if do_sample:
-                # Sampling with temperature
-                next_logits = next_logits / temperature
-                
-                # Top-k filtering
-                if top_k is not None:
-                    v: torch.Tensor
-                    v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
-                    next_logits[next_logits < v[:, [-1]]] = float('-inf')
-                
-                # Top-p (nucleus) filtering
-                if top_p is not None:
-                    sorted_logits: torch.Tensor
-                    sorted_indices: torch.Tensor
-                    sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
-                    cumulative_probs: torch.Tensor = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                    
-                    # Remove tokens with cumulative probability above threshold
-                    sorted_indices_to_remove: torch.Tensor = cumulative_probs > top_p
-                    # Keep at least one token
-                    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-                    sorted_indices_to_remove[:, 0] = False
-                    
-                    # Scatter back to original indexing
-                    indices_to_remove: torch.Tensor = sorted_indices_to_remove.scatter(
-                        1, sorted_indices, sorted_indices_to_remove
-                    )
-                    next_logits[indices_to_remove] = float('-inf')
-                
-                probs: torch.Tensor = F.softmax(next_logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
-            else:
-                # Greedy decoding - just take argmax
-                next_token = next_logits.argmax(dim=-1, keepdim=True)
+            # Sample next token
+            next_token: torch.Tensor = sampler.sample(next_logits)
             
             input_ids = torch.cat([input_ids, next_token], dim=1)
             
             # Check for EOS token
-            if eos_token_id is not None:
-                finished = finished | (next_token.squeeze(-1) == eos_token_id)
+            if config.eos_token_id is not None:
+                finished = finished | (next_token.squeeze(-1) == config.eos_token_id)
                 if finished.all():
                     break
             
@@ -230,29 +209,23 @@ class Llama(nn.Module):
     def generate_stream(
         self,
         input_ids: torch.Tensor,
-        max_new_tokens: int = 50,
-        temperature: float = 1.0,
-        top_k: int | None = None,
-        top_p: float | None = None,
-        do_sample: bool = True,
-        eos_token_id: int | None = None,
-        repetition_penalty: float = 1.0,
+        config: GenerationConfig | None = None,
+        **kwargs,
     ) -> Iterator[int]:
         """Streaming text generation - yields tokens as they're generated.
         
         Args:
-            input_ids: Input token IDs (B, L)
-            max_new_tokens: Number of tokens to generate
-            temperature: Sampling temperature (ignored if do_sample=False)
-            top_k: Top-k sampling (ignored if do_sample=False)
-            top_p: Nucleus sampling threshold (ignored if do_sample=False)
-            do_sample: If False, use greedy decoding (deterministic)
-            eos_token_id: Stop generation when this token is produced
-            repetition_penalty: Penalty for repeating tokens (1.0 = no penalty)
+            input_ids: Input token IDs (B, L) - must have batch_size=1
+            config: Generation configuration (preferred)
+            **kwargs: Individual parameters (for backwards compatibility)
         
         Yields:
             int: Token ID for each generated token
         """
+        # Build config from kwargs if not provided
+        if config is None:
+            config = GenerationConfig(**kwargs)
+        
         self.eval()
         batch_size: int = input_ids.shape[0]
         prompt_len: int = input_ids.shape[1]
@@ -260,58 +233,37 @@ class Llama(nn.Module):
         if batch_size != 1:
             raise ValueError("Streaming only supports batch_size=1")
         
+        # Create sampler
+        sampler: Sampler = Sampler(
+            temperature=config.temperature,
+            top_k=config.top_k,
+            top_p=config.top_p,
+            do_sample=config.do_sample,
+        )
+        
         # Create pre-allocated KV cache
         kv_caches: list[KVCache] = self.create_kv_caches(
             batch_size=batch_size,
-            max_seq_len=prompt_len + max_new_tokens,
+            max_seq_len=prompt_len + config.max_new_tokens,
         )
         
         # Initial forward pass (populates cache)
         logits: torch.Tensor = self(input_ids, kv_caches=kv_caches)
         
-        for _ in range(max_new_tokens):
+        for _ in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
             
             # Apply repetition penalty
-            if repetition_penalty != 1.0:
-                for token_id in input_ids[0].unique():
-                    next_logits[0, token_id] /= repetition_penalty
+            Sampler.apply_repetition_penalty(next_logits, input_ids, config.repetition_penalty)
             
-            next_token: torch.Tensor
-            if do_sample:
-                # Sampling with temperature
-                next_logits = next_logits / temperature
-                
-                # Top-k filtering
-                if top_k is not None:
-                    v: torch.Tensor
-                    v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
-                    next_logits[next_logits < v[:, [-1]]] = float('-inf')
-                
-                # Top-p (nucleus) filtering
-                if top_p is not None:
-                    sorted_logits: torch.Tensor
-                    sorted_indices: torch.Tensor
-                    sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
-                    cumulative_probs: torch.Tensor = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                    sorted_indices_to_remove: torch.Tensor = cumulative_probs > top_p
-                    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-                    sorted_indices_to_remove[:, 0] = False
-                    indices_to_remove: torch.Tensor = sorted_indices_to_remove.scatter(
-                        1, sorted_indices, sorted_indices_to_remove
-                    )
-                    next_logits[indices_to_remove] = float('-inf')
-                
-                probs: torch.Tensor = F.softmax(next_logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
-            else:
-                next_token = next_logits.argmax(dim=-1, keepdim=True)
+            # Sample next token
+            next_token: torch.Tensor = sampler.sample(next_logits)
             
             token_id: int = next_token.item()
             yield token_id
             
             # Check for EOS token
-            if eos_token_id is not None and token_id == eos_token_id:
+            if config.eos_token_id is not None and token_id == config.eos_token_id:
                 break
             
             input_ids = torch.cat([input_ids, next_token], dim=1)
@@ -321,31 +273,23 @@ class Llama(nn.Module):
     def generate_batch(
         self,
         prompts: list[torch.Tensor],
-        max_new_tokens: int = 50,
-        temperature: float = 1.0,
-        top_k: int | None = None,
-        top_p: float | None = None,
-        do_sample: bool = True,
-        eos_token_id: int | None = None,
-        repetition_penalty: float = 1.0,
-        pad_token_id: int = 0,
+        config: GenerationConfig | None = None,
+        **kwargs,
     ) -> list[torch.Tensor]:
         """Generate text for multiple prompts in parallel.
         
         Args:
             prompts: List of token ID tensors, each (1, L_i) or (L_i,)
-            max_new_tokens: Maximum tokens to generate per sequence
-            temperature: Sampling temperature
-            top_k: Top-k sampling
-            top_p: Nucleus sampling threshold
-            do_sample: If False, use greedy decoding
-            eos_token_id: Stop token
-            repetition_penalty: Penalty for repeating tokens
-            pad_token_id: Token ID used for padding
+            config: Generation configuration (preferred)
+            **kwargs: Individual parameters (for backwards compatibility)
         
         Returns:
             List of generated token tensors (without padding)
         """
+        # Build config from kwargs if not provided
+        if config is None:
+            config = GenerationConfig(**kwargs)
+        
         self.eval()
         device: torch.device = next(self.parameters()).device
         batch_size: int = len(prompts)
@@ -360,7 +304,7 @@ class Llama(nn.Module):
         for p in prompts:
             pad_len: int = max_prompt_len - len(p)
             if pad_len > 0:
-                padding: torch.Tensor = torch.full((pad_len,), pad_token_id, dtype=p.dtype, device=device)
+                padding: torch.Tensor = torch.full((pad_len,), config.pad_token_id, dtype=p.dtype, device=device)
                 padded_prompts.append(torch.cat([padding, p]))
             else:
                 padded_prompts.append(p.to(device))
@@ -368,7 +312,7 @@ class Llama(nn.Module):
         input_ids: torch.Tensor = torch.stack(padded_prompts)  # (B, max_prompt_len)
         
         # Create attention mask: 1 for real tokens, 0 for padding
-        attention_mask: torch.Tensor = (input_ids != pad_token_id).long()
+        attention_mask: torch.Tensor = (input_ids != config.pad_token_id).long()
         
         # Track which sequences have finished
         finished: torch.Tensor = torch.zeros(batch_size, dtype=torch.bool, device=device)
@@ -376,7 +320,15 @@ class Llama(nn.Module):
         # Create KV caches
         kv_caches: list[KVCache] = self.create_kv_caches(
             batch_size=batch_size,
-            max_seq_len=max_prompt_len + max_new_tokens,
+            max_seq_len=max_prompt_len + config.max_new_tokens,
+        )
+        
+        # Create sampler
+        sampler: Sampler = Sampler(
+            temperature=config.temperature,
+            top_k=config.top_k,
+            top_p=config.top_p,
+            do_sample=config.do_sample,
         )
         
         # Prefill
@@ -385,42 +337,17 @@ class Llama(nn.Module):
         # Generation loop
         generated_tokens: list[list[int]] = [[] for _ in range(batch_size)]
         
-        for _ in range(max_new_tokens):
+        for _ in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
             
-            # Apply repetition penalty
-            if repetition_penalty != 1.0:
-                for i in range(batch_size):
-                    for token_id in input_ids[i].unique():
-                        if token_id != pad_token_id:
-                            next_logits[i, token_id] /= repetition_penalty
+            # Apply repetition penalty (ignore pad token)
+            Sampler.apply_repetition_penalty(
+                next_logits, input_ids, config.repetition_penalty,
+                ignore_token_id=config.pad_token_id
+            )
             
-            next_token: torch.Tensor
-            if do_sample:
-                next_logits = next_logits / temperature
-                
-                if top_k is not None:
-                    v: torch.Tensor
-                    v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
-                    next_logits[next_logits < v[:, [-1]]] = float('-inf')
-                
-                if top_p is not None:
-                    sorted_logits: torch.Tensor
-                    sorted_indices: torch.Tensor
-                    sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
-                    cumulative_probs: torch.Tensor = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                    sorted_indices_to_remove: torch.Tensor = cumulative_probs > top_p
-                    sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
-                    sorted_indices_to_remove[:, 0] = False
-                    indices_to_remove: torch.Tensor = sorted_indices_to_remove.scatter(
-                        1, sorted_indices, sorted_indices_to_remove
-                    )
-                    next_logits[indices_to_remove] = float('-inf')
-                
-                probs: torch.Tensor = F.softmax(next_logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1)
-            else:
-                next_token = next_logits.argmax(dim=-1, keepdim=True)
+            # Sample next token
+            next_token: torch.Tensor = sampler.sample(next_logits)
             
             # Store generated tokens (only for unfinished sequences)
             for i in range(batch_size):
@@ -428,8 +355,8 @@ class Llama(nn.Module):
                     generated_tokens[i].append(next_token[i].item())
             
             # Check for EOS
-            if eos_token_id is not None:
-                finished = finished | (next_token.squeeze(-1) == eos_token_id)
+            if config.eos_token_id is not None:
+                finished = finished | (next_token.squeeze(-1) == config.eos_token_id)
                 if finished.all():
                     break
             

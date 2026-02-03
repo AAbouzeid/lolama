@@ -1,12 +1,18 @@
 """Utility functions."""
 
+from __future__ import annotations
+
 from .rope import precompute_rope_frequencies, apply_rope
-from .quantize import quantize_tensor_int8, quantize_model_int8, dequantize_tensor_int8
+from .logging import get_logger, set_verbosity, get_model_logger, get_data_logger, get_generation_logger
 
 __all__ = [
+    # RoPE
     'precompute_rope_frequencies',
     'apply_rope',
-    'quantize_tensor_int8',
-    'quantize_model_int8',
-    'dequantize_tensor_int8',
+    # Logging
+    'get_logger',
+    'set_verbosity',
+    'get_model_logger',
+    'get_data_logger',
+    'get_generation_logger',
 ]

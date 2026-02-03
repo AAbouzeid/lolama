@@ -1,9 +1,11 @@
 """Model components."""
 
 from .config import LlamaConfig
+from .generation_config import GenerationConfig
 from .kv_cache import KVCache, repeat_kv
 from .layers import RMSNorm, LlamaAttention, SwiGLU, LlamaBlock
 from .llama import Llama
+from .sampler import Sampler
 from .quantize import (
     QuantizedLinear,
     quantize_model_int8,
@@ -17,8 +19,11 @@ from .quantize import (
 __all__ = [
     # Config
     'LlamaConfig',
+    'GenerationConfig',
     # Model
     'Llama',
+    # Sampling
+    'Sampler',
     # Layers
     'LlamaBlock',
     'LlamaAttention',

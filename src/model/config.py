@@ -19,8 +19,20 @@ class LlamaConfig:
     dropout: float = 0.0         # LLaMA doesn't use dropout
     eps: float = 1e-6            # RMSNorm epsilon
     tie_word_embeddings: bool = False  # Whether embed_tokens and lm_head share weights
+    rope_base: int = 10000       # RoPE base frequency (10000 for LLaMA 1/2, 500000 for LLaMA 3)
     
     def __post_init__(self) -> None:
-        # If num_kv_heads not set, default to num_heads (standard MHA)
+        # Default num_kv_heads to num_heads (standard MHA)
         if self.num_kv_heads is None:
             self.num_kv_heads = self.num_heads
+        
+        # Validation
+        if self.d_model % self.num_heads != 0:
+            raise ValueError(
+                f"d_model ({self.d_model}) must be divisible by num_heads ({self.num_heads})"
+            )
+        
+        if self.num_heads % self.num_kv_heads != 0:
+            raise ValueError(
+                f"num_heads ({self.num_heads}) must be divisible by num_kv_heads ({self.num_kv_heads})"
+            )

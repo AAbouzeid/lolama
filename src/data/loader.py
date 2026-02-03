@@ -207,17 +207,23 @@ def create_config_from_hf(
         local_files_only=local_files_only,
     )
     
-    vocab_size = hf_config.vocab_size
-    d_model = hf_config.hidden_size
-    num_heads = hf_config.num_attention_heads
-    num_kv_heads = getattr(hf_config, 'num_key_value_heads', num_heads)
-    num_layers = hf_config.num_hidden_layers
-    hidden_dim = hf_config.intermediate_size
-    max_seq_len = getattr(hf_config, 'max_position_embeddings', 2048)
-    eps = getattr(hf_config, 'rms_norm_eps', 1e-6)
-    tie_word_embeddings = getattr(hf_config, 'tie_word_embeddings', False)
+    vocab_size: int = hf_config.vocab_size
+    d_model: int = hf_config.hidden_size
+    num_heads: int = hf_config.num_attention_heads
+    num_kv_heads: int = getattr(hf_config, 'num_key_value_heads', num_heads)
+    num_layers: int = hf_config.num_hidden_layers
+    hidden_dim: int = hf_config.intermediate_size
+    max_seq_len: int = getattr(hf_config, 'max_position_embeddings', 2048)
+    eps: float = getattr(hf_config, 'rms_norm_eps', 1e-6)
+    tie_word_embeddings: bool = getattr(hf_config, 'tie_word_embeddings', False)
+    # rope_theta location varies: top-level in some models, nested in rope_parameters in others
+    rope_params: dict | None = getattr(hf_config, 'rope_parameters', None)
+    if rope_params and 'rope_theta' in rope_params:
+        rope_base: int = int(rope_params['rope_theta'])
+    else:
+        rope_base: int = int(getattr(hf_config, 'rope_theta', 10000))  # LLaMA 3 uses 500000
     
-    config = LlamaConfig(
+    config: LlamaConfig = LlamaConfig(
         vocab_size=vocab_size,
         d_model=d_model,
         num_heads=num_heads,
@@ -227,6 +233,7 @@ def create_config_from_hf(
         max_seq_len=max_seq_len,
         eps=eps,
         tie_word_embeddings=tie_word_embeddings,
+        rope_base=rope_base,
     )
     
     print(f"  vocab_size: {vocab_size}")
@@ -235,6 +242,7 @@ def create_config_from_hf(
     print(f"  num_kv_heads: {num_kv_heads} (K/V heads - GQA)")
     print(f"  num_layers: {num_layers}")
     print(f"  hidden_dim: {hidden_dim}")
+    print(f"  rope_base: {rope_base}")
     print(f"  tie_word_embeddings: {tie_word_embeddings}")
     print()
     
