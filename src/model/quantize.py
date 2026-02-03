@@ -14,6 +14,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..utils.logging import get_model_logger
+
+logger = get_model_logger()
+
 
 class QuantizedLinear(nn.Module):
     """Linear layer with int8 quantized weights.
@@ -152,8 +156,8 @@ def quantize_model_int8(model: nn.Module, skip_layers: list[str] | None = None) 
             if module.bias is not None:
                 original_linear_size += module.bias.numel() * module.bias.element_size()
     
-    print(f"Quantizing {len(linear_layers)} Linear layers to int8...")
-    print(f"  Original Linear layers: {original_linear_size / 1e6:.1f} MB")
+    logger.info(f"Quantizing {len(linear_layers)} Linear layers to int8...")
+    logger.debug(f"Original Linear layers: {original_linear_size / 1e6:.1f} MB")
     
     # Replace each Linear with QuantizedLinear
     for name, linear in linear_layers:
@@ -174,8 +178,7 @@ def quantize_model_int8(model: nn.Module, skip_layers: list[str] | None = None) 
     )
     
     reduction_pct: float = (1 - quantized_size / original_linear_size) * 100
-    print(f"  Quantized layers: {quantized_size / 1e6:.1f} MB")
-    print(f"  Memory reduction: {reduction_pct:.0f}% (on quantized layers)")
+    logger.info(f"Quantized to {quantized_size / 1e6:.1f} MB ({reduction_pct:.0f}% reduction)")
     
     return model
 
@@ -200,7 +203,7 @@ def dequantize_model_for_inference(model: nn.Module, dtype: torch.dtype = torch.
             count += 1
     
     if count > 0:
-        print(f"Pre-dequantized {count} layers for fast inference")
+        logger.info(f"Pre-dequantized {count} layers for fast inference")
     
     return model
 
@@ -251,7 +254,7 @@ def save_quantized_model(
             src_file: Path = source_path / filename
             if src_file.exists():
                 shutil.copy2(src_file, output_path / filename)
-                print(f"  Copied {filename}")
+                logger.debug(f"Copied {filename}")
     
     # Save quantized weights
     weights_path: Path = output_path / "model.pt"
@@ -266,7 +269,7 @@ def save_quantized_model(
     }, weights_path)
     
     size_mb: float = weights_path.stat().st_size / 1e6
-    print(f"  Saved model.pt ({size_mb:.1f} MB)")
+    logger.debug(f"Saved model.pt ({size_mb:.1f} MB)")
     
     # Save quantization config
     quant_config: dict = {
@@ -278,7 +281,7 @@ def save_quantized_model(
     with open(quant_config_path, 'w') as f:
         json.dump(quant_config, f, indent=2)
     
-    print(f"Saved quantized model to {output_dir}/")
+    logger.info(f"Saved quantized model to {output_dir}/")
 
 
 def load_quantized_model(
@@ -311,7 +314,7 @@ def load_quantized_model(
         raise ValueError(f"{weights_path} is not a quantized model checkpoint")
     
     model.load_state_dict(checkpoint['state_dict'])
-    print(f"Loaded quantized model from {model_dir}/")
+    logger.info(f"Loaded quantized model from {model_dir}/")
     
     return model
 

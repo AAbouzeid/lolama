@@ -20,12 +20,13 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data import load_model, load_tokenizer
-from src.model import quantize_model_int8, get_model_size_mb
+from src.model import quantize_model_int8, get_model_size_mb, TextGenerator
+from src.utils import resolve_device
 
 
 def main() -> None:
     # Device
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    device = resolve_device()
     print(f"Device: {device}")
     print()
     
@@ -53,9 +54,10 @@ def main() -> None:
     
     print(f"\nPrompt: \"{prompt}\"")
     print("\n--- Before Quantization (greedy) ---")
-    
+
+    generator = TextGenerator(model)
     with torch.no_grad():
-        output_ids = model.generate(
+        output_ids = generator.generate(
             input_ids,
             max_new_tokens=30,
             do_sample=False,  # Greedy decoding for reproducibility
@@ -79,10 +81,11 @@ def main() -> None:
     
     # Test generation after quantization
     print("\n--- After Quantization (greedy) ---")
-    
-    # Need to recreate KV caches since model changed
+
+    # Need to recreate generator since model changed
+    generator = TextGenerator(model)
     with torch.no_grad():
-        output_ids = model.generate(
+        output_ids = generator.generate(
             input_ids,
             max_new_tokens=30,
             do_sample=False,  # Greedy decoding for reproducibility
@@ -114,7 +117,7 @@ def main() -> None:
             input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
         
         with torch.no_grad():
-            output_ids = model.generate(
+            output_ids = generator.generate(
                 input_ids,
                 max_new_tokens=50,
                 do_sample=False,  # Greedy decoding for reproducibility

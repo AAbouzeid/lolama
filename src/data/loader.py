@@ -8,6 +8,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..model import Llama, LlamaConfig
+from ..utils.logging import get_data_logger
+
+logger = get_data_logger()
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 WEIGHTS_DIR = PROJECT_ROOT / "weights"
@@ -130,7 +133,7 @@ def load_weights_from_hf(
     Raises:
         WeightLoadingError: If match rate falls below strict_threshold
     """
-    print(f"Loading weights from {hf_model_path}...")
+    logger.info(f"Loading weights from {hf_model_path}...")
     hf_model = _try_from_pretrained(
         hf_model_path,
         trust_remote_code=trust_remote_code,
@@ -204,51 +207,40 @@ def load_weights_from_hf(
     missing_after_load, unexpected = our_model.load_state_dict(new_state_dict, strict=False)
 
     # Report results
-    print(f"✅ Successfully loaded {matched}/{total_expected} weights ({match_rate:.1%})")
+    logger.info(f"Successfully loaded {matched}/{total_expected} weights ({match_rate:.1%})")
 
     if missing_after_load:
         # Filter out expected missing keys (RoPE buffers)
         rope_buffers = [k for k in missing_after_load if 'cos' in k or 'sin' in k]
         other_missing = [k for k in missing_after_load if k not in rope_buffers]
         if rope_buffers:
-            print(f"   Note: {len(rope_buffers)} RoPE buffers not in checkpoint (expected)")
+            logger.debug(f"{len(rope_buffers)} RoPE buffers not in checkpoint (expected)")
         if other_missing:
-            print(f"   Warning: {len(other_missing)} unexpected missing keys: {other_missing[:5]}")
+            logger.warning(f"{len(other_missing)} unexpected missing keys: {other_missing[:5]}")
 
     if missing_in_hf:
-        print(f"❌ {len(missing_in_hf)} keys missing in HuggingFace model:")
-        for key in missing_in_hf[:5]:
-            print(f"     - {key}")
-        if len(missing_in_hf) > 5:
-            print(f"     ... and {len(missing_in_hf) - 5} more")
+        logger.error(f"{len(missing_in_hf)} keys missing in HuggingFace model: {missing_in_hf[:5]}")
 
     if missing_in_ours:
-        print(f"❌ {len(missing_in_ours)} keys missing in our model:")
-        for key in missing_in_ours[:5]:
-            print(f"     - {key}")
-        if len(missing_in_ours) > 5:
-            print(f"     ... and {len(missing_in_ours) - 5} more")
+        logger.error(f"{len(missing_in_ours)} keys missing in our model: {missing_in_ours[:5]}")
 
     if shape_mismatches:
-        print(f"❌ {len(shape_mismatches)} shape mismatches:")
         for m in shape_mismatches[:5]:
-            print(f"     {m['our_key']}: HF={m['hf_shape']} vs Ours={m['our_shape']}")
-        if len(shape_mismatches) > 5:
-            print(f"     ... and {len(shape_mismatches) - 5} more")
+            logger.error(f"Shape mismatch: {m['our_key']}: HF={m['hf_shape']} vs Ours={m['our_shape']}")
 
     # Strict threshold check
     if match_rate < strict_threshold:
         error_msg = (
             f"Weight loading failed: {match_rate:.1%} matched, "
-            f"but {strict_threshold:.0%} required.\n"
-            f"  - Missing in HF: {len(missing_in_hf)}\n"
-            f"  - Missing in model: {len(missing_in_ours)}\n"
-            f"  - Shape mismatches: {len(shape_mismatches)}"
+            f"but {strict_threshold:.0%} required. "
+            f"Missing in HF: {len(missing_in_hf)}, "
+            f"Missing in model: {len(missing_in_ours)}, "
+            f"Shape mismatches: {len(shape_mismatches)}"
         )
         raise WeightLoadingError(error_msg)
 
     if matched == total_expected:
-        print("\n🎉 All weights loaded successfully!")
+        logger.info("All weights loaded successfully!")
 
     return our_model
 
@@ -260,14 +252,14 @@ def create_config_from_hf(
 ) -> LlamaConfig:
     """Create LlamaConfig from HuggingFace model."""
     from transformers import AutoConfig
-    
-    print(f"Loading config from {hf_model_name}...")
+
+    logger.info(f"Loading config from {hf_model_name}...")
     hf_config = AutoConfig.from_pretrained(
         hf_model_name,
         trust_remote_code=trust_remote_code,
         local_files_only=local_files_only,
     )
-    
+
     vocab_size: int = hf_config.vocab_size
     d_model: int = hf_config.hidden_size
     num_heads: int = hf_config.num_attention_heads
@@ -283,7 +275,7 @@ def create_config_from_hf(
         rope_base: int = int(rope_params['rope_theta'])
     else:
         rope_base: int = int(getattr(hf_config, 'rope_theta', 10000))  # LLaMA 3 uses 500000
-    
+
     config: LlamaConfig = LlamaConfig(
         vocab_size=vocab_size,
         d_model=d_model,
@@ -296,17 +288,11 @@ def create_config_from_hf(
         tie_word_embeddings=tie_word_embeddings,
         rope_base=rope_base,
     )
-    
-    print(f"  vocab_size: {vocab_size}")
-    print(f"  d_model: {d_model}")
-    print(f"  num_heads: {num_heads} (Q heads)")
-    print(f"  num_kv_heads: {num_kv_heads} (K/V heads - GQA)")
-    print(f"  num_layers: {num_layers}")
-    print(f"  hidden_dim: {hidden_dim}")
-    print(f"  rope_base: {rope_base}")
-    print(f"  tie_word_embeddings: {tie_word_embeddings}")
-    print()
-    
+
+    logger.debug(f"Config: vocab_size={vocab_size}, d_model={d_model}, num_heads={num_heads}, "
+                 f"num_kv_heads={num_kv_heads}, num_layers={num_layers}, hidden_dim={hidden_dim}, "
+                 f"rope_base={rope_base}, tie_word_embeddings={tie_word_embeddings}")
+
     return config
 
 
@@ -317,20 +303,17 @@ def load_model(
     compile_model: bool = False,
 ) -> Llama:
     """Load a pretrained model from HuggingFace.
-    
+
     Args:
         model_name_or_path: HuggingFace model name or local path
         device: Device to load on
         dtype: Model dtype (default: float16 to match HF models)
         compile_model: If True, use torch.compile() for speedup (requires PyTorch 2.0+)
-    
+
     Returns:
         Llama model with loaded weights
     """
-    print("=" * 60)
-    print(f"Loading Model: {model_name_or_path}")
-    print("=" * 60)
-    print()
+    logger.info(f"Loading model: {model_name_or_path}")
 
     source = resolve_model_source(model_name_or_path)
     model_path = source["local_path"] if source["local_path"] is not None else source["hf_name"]
@@ -349,23 +332,21 @@ def load_model(
             trust_remote_code=trust_remote_code,
             local_files_only=False,
         )
-    
-    print("Creating model architecture...")
+
+    logger.info("Creating model architecture...")
     # Use meta device to skip weight initialization entirely (much faster)
     with torch.device('meta'):
         our_model = Llama(config, init_weights=False)
-    
+
     # Materialize empty tensors on CPU with target dtype
     our_model = our_model.to_empty(device='cpu').to(dtype)
-    
+
     # Re-initialize RoPE buffers (meta device doesn't compute them)
     our_model.init_rope()
-    
+
     total_params: int = sum(p.numel() for p in our_model.parameters())
-    print(f"  Total parameters: {total_params:,}")
-    print(f"  dtype: {dtype}")
-    print()
-    
+    logger.info(f"Total parameters: {total_params:,}, dtype: {dtype}")
+
     if source["local_path"] is not None:
         our_model = load_weights_from_hf(
             our_model,
@@ -388,17 +369,15 @@ def load_model(
                 trust_remote_code=trust_remote_code,
                 local_files_only=False,
             )
-    
-    print(f"\nMoving model to {device}...")
+
+    logger.info(f"Moving model to {device}...")
     our_model = our_model.to(device)
-    
+
     # Optional: torch.compile() for speedup (PyTorch 2.0+)
     if compile_model:
-        print("Compiling model with torch.compile()...")
+        logger.info("Compiling model with torch.compile()...")
         our_model = torch.compile(our_model)
-    
-    print("\n" + "=" * 60)
-    print("Model ready!")
-    print("=" * 60)
-    
+
+    logger.info("Model ready!")
+
     return our_model

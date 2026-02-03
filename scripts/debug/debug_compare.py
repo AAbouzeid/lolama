@@ -18,10 +18,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from src.data import load_model, load_tokenizer
 from src.model import TextGenerator
+from src.utils import resolve_device
 
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
-device = "mps" if torch.backends.mps.is_available() else "cpu"
+device = resolve_device()
 print(f"Device: {device}\n")
 
 # Load tokenizer

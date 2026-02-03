@@ -18,7 +18,8 @@ from src.model import Llama, LlamaConfig
 
 
 def main() -> None:
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    from src.utils import resolve_device
+    device = resolve_device()
     print(f"Device: {device}")
     print()
     
