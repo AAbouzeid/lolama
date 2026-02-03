@@ -2,6 +2,8 @@
 
 from .config import LlamaConfig
 from .generation_config import GenerationConfig
+from .generator import TextGenerator
+from ..protocols import GenerativeModel
 from .kv_cache import KVCache, repeat_kv
 from .layers import RMSNorm, LlamaAttention, SwiGLU, LlamaBlock
 from .llama import Llama
@@ -22,7 +24,9 @@ __all__ = [
     'GenerationConfig',
     # Model
     'Llama',
-    # Sampling
+    # Generation
+    'GenerativeModel',
+    'TextGenerator',
     'Sampler',
     # Layers
     'LlamaBlock',
