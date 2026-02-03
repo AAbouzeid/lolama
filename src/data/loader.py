@@ -110,13 +110,12 @@ def load_weights_from_hf(our_model, hf_model_path, trust_remote_code=False, loca
     )
     
     hf_state = hf_model.state_dict()
-    our_state = our_model.state_dict()
     
     print(f"HF model has {len(hf_state)} parameters")
-    print(f"Our model has {len(our_state)} parameters")
+    print(f"Our model has {len(list(our_model.state_dict().keys()))} parameters")
     print()
     
-    # Build mapping
+    # Build mapping (HF key -> Our key)
     mapping = {}
     mapping['model.embed_tokens.weight'] = 'embed_tokens.weight'
     
@@ -138,26 +137,40 @@ def load_weights_from_hf(our_model, hf_model_path, trust_remote_code=False, loca
     mapping['model.norm.weight'] = 'norm.weight'
     mapping['lm_head.weight'] = 'lm_head.weight'
     
-    # Copy weights
+    # Get current state dict for shape comparison
+    our_state = our_model.state_dict()
+    
+    # Build new state dict with HF weights mapped to our keys
+    new_state_dict = {}
     matched = 0
     shape_mismatches = []
     
     for hf_key, our_key in mapping.items():
-        if hf_key not in hf_state or our_key not in our_state:
+        if hf_key not in hf_state:
             continue
         
-        if hf_state[hf_key].shape != our_state[our_key].shape:
+        hf_tensor = hf_state[hf_key]
+        
+        if our_key not in our_state:
+            continue
+        
+        our_tensor = our_state[our_key]
+        
+        if hf_tensor.shape != our_tensor.shape:
             shape_mismatches.append({
                 'key': our_key,
-                'hf_shape': hf_state[hf_key].shape,
-                'our_shape': our_state[our_key].shape
+                'hf_shape': hf_tensor.shape,
+                'our_shape': our_tensor.shape
             })
             continue
         
-        our_state[our_key].copy_(hf_state[hf_key])
+        new_state_dict[our_key] = hf_tensor.to(our_tensor.dtype)
         matched += 1
     
-    our_model.load_state_dict(our_state)
+    # Load all weights at once
+    missing, unexpected = our_model.load_state_dict(new_state_dict, strict=False)
+    if missing:
+        print(f"   Note: {len(missing)} keys not in new_state_dict (expected for RoPE buffers)")
     
     print(f"✅ Successfully loaded {matched}/{len(mapping)} weights")
     
@@ -191,6 +204,7 @@ def create_config_from_hf(hf_model_name, trust_remote_code=False, local_files_on
     hidden_dim = hf_config.intermediate_size
     max_seq_len = getattr(hf_config, 'max_position_embeddings', 2048)
     eps = getattr(hf_config, 'rms_norm_eps', 1e-6)
+    tie_word_embeddings = getattr(hf_config, 'tie_word_embeddings', False)
     
     config = LlamaConfig(
         vocab_size=vocab_size,
@@ -201,6 +215,7 @@ def create_config_from_hf(hf_model_name, trust_remote_code=False, local_files_on
         hidden_dim=hidden_dim,
         max_seq_len=max_seq_len,
         eps=eps,
+        tie_word_embeddings=tie_word_embeddings,
     )
     
     print(f"  vocab_size: {vocab_size}")
@@ -209,6 +224,7 @@ def create_config_from_hf(hf_model_name, trust_remote_code=False, local_files_on
     print(f"  num_kv_heads: {num_kv_heads} (K/V heads - GQA)")
     print(f"  num_layers: {num_layers}")
     print(f"  hidden_dim: {hidden_dim}")
+    print(f"  tie_word_embeddings: {tie_word_embeddings}")
     print()
     
     return config

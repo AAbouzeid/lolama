@@ -15,6 +15,7 @@ class LlamaConfig:
     max_seq_len: int = 2048      # Maximum sequence length
     dropout: float = 0.0         # LLaMA doesn't use dropout
     eps: float = 1e-6            # RMSNorm epsilon
+    tie_word_embeddings: bool = False  # Whether embed_tokens and lm_head share weights
     
     def __post_init__(self):
         # If num_kv_heads not set, default to num_heads (standard MHA)

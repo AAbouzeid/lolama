@@ -10,9 +10,9 @@ from ..utils.rope import precompute_rope_frequencies, apply_rope
 
 
 class RMSNorm(nn.Module):
-    """Root Mean Square Layer Normalization.
+    """Root Mean Square Layer Normalization (HuggingFace compatible).
     
-    Simpler than LayerNorm - no mean subtraction, just normalize by RMS.
+    Computes in fp32 for numerical stability, then converts back.
     """
     
     def __init__(self, dim, eps=1e-6):
@@ -21,8 +21,11 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
     
     def forward(self, x):
-        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
-        return x / rms * self.weight
+        input_dtype = x.dtype
+        x = x.to(torch.float32)
+        variance = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.eps)
+        return (self.weight * x).to(input_dtype)
 
 
 def repeat_kv(x, n_rep):

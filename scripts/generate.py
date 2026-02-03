@@ -50,7 +50,18 @@ def main():
     print(f"Prompt: \"{prompt}\"")
     print("-" * 50)
     
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+    if getattr(tokenizer, "chat_template", None):
+        messages = [{"role": "user", "content": prompt}]
+        input_ids = tokenizer.apply_chat_template(
+            messages,
+            return_tensors="pt",
+            add_generation_prompt=True,
+        )
+        if not isinstance(input_ids, torch.Tensor):
+            input_ids = input_ids["input_ids"]
+        input_ids = input_ids.to(device)
+    else:
+        input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
     
     with torch.no_grad():
         output_ids = model.generate(

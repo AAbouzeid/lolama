@@ -20,8 +20,9 @@ class Llama(nn.Module):
         self.norm = RMSNorm(config.d_model, config.eps)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         
-        # Weight tying
-        self.lm_head.weight = self.embed_tokens.weight
+        # Weight tying: LLaMA-1/2 use it, TinyLlama does not
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.embed_tokens.weight
         
         self.apply(self._init_weights)
     
