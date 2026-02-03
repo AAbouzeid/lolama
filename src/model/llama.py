@@ -55,6 +55,14 @@ class Llama(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
     
+    def init_rope(self) -> None:
+        """Re-initialize RoPE buffers. Call after materializing from meta device."""
+        head_dim: int = self.config.d_model // self.config.num_heads
+        cos, sin = precompute_rope_frequencies(head_dim, self.config.max_seq_len)
+        # Copy data to existing buffers (preserves device)
+        self.cos.copy_(cos.to(self.cos.device))
+        self.sin.copy_(sin.to(self.sin.device))
+    
     def create_kv_caches(
         self,
         batch_size: int,

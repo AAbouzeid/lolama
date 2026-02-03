@@ -282,10 +282,17 @@ def load_model(
         )
     
     print("Creating model architecture...")
-    our_model = Llama(config, init_weights=False)  # Skip random init, we're loading weights
-    our_model = our_model.to(dtype)  # Convert to target dtype before loading weights
+    # Use meta device to skip weight initialization entirely (much faster)
+    with torch.device('meta'):
+        our_model = Llama(config, init_weights=False)
     
-    total_params = sum(p.numel() for p in our_model.parameters())
+    # Materialize empty tensors on CPU with target dtype
+    our_model = our_model.to_empty(device='cpu').to(dtype)
+    
+    # Re-initialize RoPE buffers (meta device doesn't compute them)
+    our_model.init_rope()
+    
+    total_params: int = sum(p.numel() for p in our_model.parameters())
     print(f"  Total parameters: {total_params:,}")
     print(f"  dtype: {dtype}")
     print()
