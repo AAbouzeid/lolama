@@ -38,9 +38,6 @@ lolama generate "The key to understanding transformers is"
 # Use a specific model by alias
 lolama generate -m open_llama_3b "The key to understanding transformers is"
 
-# Stream output in real-time
-lolama generate --stream "Once upon a time"
-
 # Interactive chat mode
 lolama chat
 ```
@@ -75,11 +72,7 @@ List all models and aliases:
 lolama models
 ```
 
-Download for offline use:
-
-```bash
-lolama download tinyllama    # Downloads to ./weights/
-```
+Models are downloaded automatically on first use — you'll be prompted to confirm with the download size before anything is fetched.
 
 ---
 
@@ -101,13 +94,13 @@ Generate text from a prompt.
 lolama generate [OPTIONS] [PROMPT]
 
 Options:
-  -m, --model TEXT        Model alias, HF name, or local path (default: tinyllama)
-  --max-tokens INT        Maximum tokens to generate (default: 256)
-  --temperature FLOAT     Sampling temperature (default: 0.7)
-  --top-p FLOAT           Nucleus sampling threshold (default: 0.9)
-  --stream                Stream tokens as they're generated
-  --quantize              Use int8 quantization
-  --fast                  Pre-dequantize weights for faster inference
+  -m, --model TEXT             Model alias, HF name, or local path (default: tinyllama)
+  --max-tokens INT             Maximum tokens to generate (default: 256)
+  --temperature FLOAT          Sampling temperature (default: 0.7)
+  --top-p FLOAT                Nucleus sampling threshold (default: 0.9)
+  --repetition-penalty FLOAT   Repetition penalty (default: 1.1)
+  --no-stream                  Disable streaming (wait for full response)
+  --quantize                   Use int8 quantization
 ```
 
 **Examples:**
@@ -121,46 +114,25 @@ lolama generate --temperature 0.0 "The capital of France is"
 
 # Memory-efficient generation with quantization
 lolama generate --quantize "Explain quantum computing"
+
+# Pipe input from stdin
+echo "Explain transformers" | lolama generate
 ```
 
 ### `lolama chat`
 
-Interactive chat session (REPL).
+Interactive chat session (REPL). Streams by default.
 
 ```bash
 lolama chat [OPTIONS]
 
 Options:
-  -m, --model TEXT        Model alias, HF name, or local path (default: tinyllama)
-  --max-tokens INT        Maximum tokens per response (default: 256)
-  --temperature FLOAT     Sampling temperature (default: 0.7)
-  --top-p FLOAT           Nucleus sampling threshold (default: 0.9)
-  --stream                Stream tokens as they're generated
-  --quantize              Use int8 quantization
-  --fast                  Pre-dequantize weights for faster inference
-```
-
-### `lolama download`
-
-Download and cache models locally.
-
-```bash
-lolama download MODEL_ALIAS [OPTIONS]
-
-Options:
-  --from-cache    Use local HF cache only (no download)
-```
-
-### `lolama quantize`
-
-Test or apply int8 quantization.
-
-```bash
-lolama quantize [OPTIONS]
-
-Options:
-  -m, --model TEXT    Model alias, HF name, or local path (default: tinyllama)
-  --save              Save quantized weights to disk
+  -m, --model TEXT             Model alias, HF name, or local path (default: tinyllama)
+  --max-tokens INT             Maximum tokens per response (default: 256)
+  --temperature FLOAT          Sampling temperature (default: 0.7)
+  --top-p FLOAT                Nucleus sampling threshold (default: 0.9)
+  --repetition-penalty FLOAT   Repetition penalty (default: 1.1)
+  --quantize                   Use int8 quantization
 ```
 
 ---

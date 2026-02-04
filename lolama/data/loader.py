@@ -290,28 +290,38 @@ def create_config_from_hf(
     return config
 
 
-def _save_hf_model_locally(
+def download_model(
     hf_name: str,
     save_dir: Path,
     trust_remote_code: bool = False,
+    from_cache: bool = False,
 ) -> None:
-    """Download and save HF model + tokenizer to local weights/ directory."""
+    """Download and save HF model + tokenizer to local weights/ directory.
+
+    Args:
+        hf_name: HuggingFace model name
+        save_dir: Local directory to save to
+        trust_remote_code: Whether to trust remote code
+        from_cache: If True, only use local HF cache (no download)
+    """
     save_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info(f"Downloading {hf_name} to {save_dir}...")
 
-    # Download model
     try:
         hf_model = _try_from_pretrained(hf_name, trust_remote_code, local_files_only=True)
     except OSError:
+        if from_cache:
+            raise
         hf_model = _try_from_pretrained(hf_name, trust_remote_code, local_files_only=False)
 
     hf_model.save_pretrained(save_dir)
 
-    # Download tokenizer
     try:
         tokenizer = AutoTokenizer.from_pretrained(hf_name, trust_remote_code=trust_remote_code, local_files_only=True)
     except OSError:
+        if from_cache:
+            raise
         tokenizer = AutoTokenizer.from_pretrained(hf_name, trust_remote_code=trust_remote_code, local_files_only=False)
 
     tokenizer.save_pretrained(save_dir)
@@ -357,7 +367,7 @@ def load_model(
         folder_name = hf_name.replace("/", "_").replace("\\", "_")
         save_dir = WEIGHTS_DIR / folder_name
         if not (save_dir.exists() and any(save_dir.iterdir())):
-            _save_hf_model_locally(hf_name, save_dir, trust_remote_code)
+            download_model(hf_name, save_dir, trust_remote_code)
         source["local_path"] = save_dir
 
     model_path = source["local_path"] if source["local_path"] is not None else source["hf_name"]

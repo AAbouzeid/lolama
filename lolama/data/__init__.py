@@ -6,6 +6,7 @@ from .loader import (
     create_config_from_hf,
     load_tokenizer,
     resolve_model_source,
+    download_model,
     WeightLoadingError,
 )
 from .registry import MODEL_REGISTRY
