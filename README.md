@@ -49,10 +49,15 @@ from lolama import load_model, load_tokenizer, TextGenerator
 
 model = load_model("tinyllama")          # alias works here too
 tokenizer = load_tokenizer("tinyllama")
-generator = TextGenerator(model, tokenizer)
+generator = TextGenerator(model)
 
-for token in generator.generate_stream("The meaning of life is", max_new_tokens=100):
-    print(token, end="", flush=True)
+# Tokenize and move to model device
+input_ids = tokenizer.encode("The meaning of life is", return_tensors="pt")
+input_ids = input_ids.to(next(model.parameters()).device)
+
+# Stream tokens as they're generated
+for token_id in generator.generate_stream(input_ids, max_new_tokens=100):
+    print(tokenizer.decode([token_id]), end="", flush=True)
 ```
 
 ---
@@ -143,6 +148,7 @@ Options:
   --temperature FLOAT          Sampling temperature (default: 0.7)
   --top-p FLOAT                Nucleus sampling threshold (default: 0.9)
   --repetition-penalty FLOAT   Repetition penalty (default: 1.1)
+  --no-stream                  Disable streaming (wait for full response)
   --quantize                   Use int8 quantization
 ```
 
@@ -163,9 +169,9 @@ Llama
 │   │   └── o_proj        # Output projection
 │   ├── attention_norm    # RMSNorm (pre-attention)
 │   ├── feed_forward      # SwiGLU FFN
-│   │   ├── gate_proj     # Gating projection
-│   │   ├── up_proj       # Up projection
-│   │   └── down_proj     # Down projection
+│   │   ├── w_gate        # Gating projection
+│   │   ├── w_up          # Up projection
+│   │   └── w_down        # Down projection
 │   └── ffn_norm          # RMSNorm (pre-FFN)
 ├── norm                  # Final RMSNorm
 └── lm_head               # Output projection to vocabulary
@@ -232,17 +238,27 @@ model = Llama(config)
 ```
 lolama/
 ├── lolama/
-│   ├── model/           # Core model components
-│   │   ├── llama.py     # Main Llama class
-│   │   ├── layers.py    # Attention, FFN, RMSNorm
-│   │   ├── generator.py # Text generation
-│   │   ├── kv_cache.py  # KV cache implementation
-│   │   └── quantize.py  # Int8 quantization
-│   ├── data/            # Model loading & registry
-│   ├── utils/           # RoPE, device detection, logging
-│   └── cli.py           # Command-line interface
-├── tests/               # Comprehensive test suite
-└── weights/             # Local model storage
+│   ├── model/               # Core model components
+│   │   ├── llama.py         # Main Llama class
+│   │   ├── config.py        # LlamaConfig dataclass
+│   │   ├── layers.py        # Attention, FFN, RMSNorm
+│   │   ├── generator.py     # Text generation with KV cache
+│   │   ├── generation_config.py  # Generation parameters
+│   │   ├── sampler.py       # Top-k/top-p sampling
+│   │   ├── kv_cache.py      # KV cache implementation
+│   │   └── quantize.py      # Int8 quantization
+│   ├── data/                # Model loading & registry
+│   │   ├── loader.py        # HF weight loading & downloading
+│   │   └── registry.py      # Supported model definitions
+│   ├── metal/               # Metal GPU acceleration (macOS)
+│   ├── protocols/           # Protocol types for model interface
+│   ├── utils/               # RoPE, device detection, logging
+│   │   ├── rope.py          # Rotary position embeddings
+│   │   ├── device.py        # Auto device detection
+│   │   └── logging.py       # Logging utilities
+│   └── cli.py               # Command-line interface
+├── tests/                   # Comprehensive test suite
+└── weights/                 # Local model storage
 ```
 
 ---
