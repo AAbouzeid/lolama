@@ -35,11 +35,14 @@ pip install -e .
 # Generate with TinyLlama (default, ~1.1B params)
 lolama generate "The key to understanding transformers is"
 
+# Use a specific model by alias
+lolama generate -m open_llama_3b "The key to understanding transformers is"
+
 # Stream output in real-time
 lolama generate --stream "Once upon a time"
 
 # Interactive chat mode
-lolama generate --chat
+lolama chat
 ```
 
 ### Python API
@@ -47,8 +50,8 @@ lolama generate --chat
 ```python
 from lolama import load_model, load_tokenizer, TextGenerator
 
-model = load_model("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-tokenizer = load_tokenizer("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+model = load_model("tinyllama")          # alias works here too
+tokenizer = load_tokenizer("tinyllama")
 generator = TextGenerator(model, tokenizer)
 
 for token in generator.generate_stream("The meaning of life is", max_new_tokens=100):
@@ -59,9 +62,18 @@ for token in generator.generate_stream("The meaning of life is", max_new_tokens=
 
 ## Supported Models
 
-| Model | Params | Hugging Face ID |
-|-------|--------|-----------------|
-| TinyLlama | 1.1B | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` |
+| Alias | Params | Description | Hugging Face ID |
+|-------|--------|-------------|-----------------|
+| `tinyllama` | 1.1B | TinyLlama 1.1B Chat — small, fast, instruction-tuned | `TinyLlama/TinyLlama-1.1B-Chat-v1.0` |
+| `open_llama_3b` | 3B | OpenLLaMA 3B v2 — compact base model | `openlm-research/open_llama_3b_v2` |
+| `open_llama_7b` | 7B | OpenLLaMA 7B v2 — full-size base model | `openlm-research/open_llama_7b_v2` |
+| `llama7b` | 7B | LLaMA 2 7B — Meta's base model (gated, requires access) | `meta-llama/Llama-2-7b-hf` |
+
+List all models and aliases:
+
+```bash
+lolama models
+```
 
 Download for offline use:
 
@@ -73,6 +85,14 @@ lolama download tinyllama    # Downloads to ./weights/
 
 ## CLI Reference
 
+### `lolama models`
+
+List available model aliases.
+
+```bash
+lolama models
+```
+
 ### `lolama generate`
 
 Generate text from a prompt.
@@ -81,29 +101,43 @@ Generate text from a prompt.
 lolama generate [OPTIONS] [PROMPT]
 
 Options:
-  --model, -m TEXT        Model name or path (default: TinyLlama)
-  --max-tokens, -n INT    Maximum tokens to generate (default: 256)
-  --temperature, -t FLOAT Sampling temperature (default: 0.7)
+  -m, --model TEXT        Model alias, HF name, or local path (default: tinyllama)
+  --max-tokens INT        Maximum tokens to generate (default: 256)
+  --temperature FLOAT     Sampling temperature (default: 0.7)
   --top-p FLOAT           Nucleus sampling threshold (default: 0.9)
-  --top-k INT             Top-k filtering
   --stream                Stream tokens as they're generated
-  --chat                  Interactive chat mode
   --quantize              Use int8 quantization
   --fast                  Pre-dequantize weights for faster inference
-  --device TEXT           Force device (cuda/mps/cpu)
 ```
 
 **Examples:**
 
 ```bash
-# Creative writing with higher temperature
-lolama generate -t 1.2 "Write a haiku about recursion"
+# Use a specific model
+lolama generate -m open_llama_3b "Write a haiku about recursion"
 
 # Deterministic output with greedy decoding
-lolama generate -t 0.0 "The capital of France is"
+lolama generate --temperature 0.0 "The capital of France is"
 
 # Memory-efficient generation with quantization
 lolama generate --quantize "Explain quantum computing"
+```
+
+### `lolama chat`
+
+Interactive chat session (REPL).
+
+```bash
+lolama chat [OPTIONS]
+
+Options:
+  -m, --model TEXT        Model alias, HF name, or local path (default: tinyllama)
+  --max-tokens INT        Maximum tokens per response (default: 256)
+  --temperature FLOAT     Sampling temperature (default: 0.7)
+  --top-p FLOAT           Nucleus sampling threshold (default: 0.9)
+  --stream                Stream tokens as they're generated
+  --quantize              Use int8 quantization
+  --fast                  Pre-dequantize weights for faster inference
 ```
 
 ### `lolama download`
@@ -125,7 +159,7 @@ Test or apply int8 quantization.
 lolama quantize [OPTIONS]
 
 Options:
-  --model, -m TEXT    Model to quantize
+  -m, --model TEXT    Model alias, HF name, or local path (default: tinyllama)
   --save              Save quantized weights to disk
 ```
 
@@ -172,7 +206,7 @@ Reduce memory usage with int8 weight-only quantization:
 from lolama import load_model
 from lolama.model import quantize_model_int8, get_model_size_mb
 
-model = load_model("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+model = load_model("tinyllama")
 print(f"Original: {get_model_size_mb(model):.0f} MB")
 
 quantize_model_int8(model)

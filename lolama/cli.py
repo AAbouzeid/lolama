@@ -9,8 +9,8 @@ from pathlib import Path
 import torch
 
 
-def cmd_generate(args: argparse.Namespace) -> None:
-    """Generate text from a prompt."""
+def _load_generator(args: argparse.Namespace):
+    """Shared model/tokenizer setup for generate and chat commands."""
     from .data import load_model, load_tokenizer, resolve_model_source
     from .model import (
         TextGenerator,
@@ -36,7 +36,6 @@ def cmd_generate(args: argparse.Namespace) -> None:
         return weights_dir / f"{name}-int8"
 
     quantized_dir = get_quantized_dir(model_path)
-    tokenizer_source = model_path
 
     if args.quantize and is_quantized_model_dir(str(quantized_dir)):
         print(f"Found saved quantized model: {quantized_dir}/")
@@ -63,7 +62,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
     else:
         model = load_model(model_path, device=device)
 
-    tokenizer = load_tokenizer(tokenizer_source)
+    tokenizer = load_tokenizer(model_path)
     generator = TextGenerator(model)
 
     def tokenize_prompt(prompt: str) -> torch.Tensor:
@@ -77,7 +76,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
             return input_ids.to(device)
         return tokenizer.encode(prompt, return_tensors="pt").to(device)
 
-    def generate_response(prompt: str, stream: bool) -> None:
+    def respond(prompt: str, stream: bool) -> None:
         input_ids = tokenize_prompt(prompt)
         if stream:
             generated_tokens: list[int] = []
@@ -108,27 +107,54 @@ def cmd_generate(args: argparse.Namespace) -> None:
             generated_ids = output_ids[0, input_ids.shape[1]:]
             print(tokenizer.decode(generated_ids, skip_special_tokens=True))
 
-    if args.chat:
-        print("=" * 50)
-        print("Interactive Chat Mode (Ctrl+C to exit)")
-        print("=" * 50)
-        print()
-        try:
-            while True:
-                prompt = input("You: ").strip()
-                if not prompt:
-                    continue
-                print("\nAssistant: ", end="", flush=True)
-                generate_response(prompt, stream=args.stream)
-                print()
-        except (KeyboardInterrupt, EOFError):
-            print("\n\nExiting chat...")
-    else:
-        prompt = args.prompt or "The meaning of life is"
-        print(f'Prompt: "{prompt}"')
-        print("-" * 50)
-        print("Output: ", end="", flush=True)
-        generate_response(prompt, stream=args.stream)
+    return respond
+
+
+def cmd_generate(args: argparse.Namespace) -> None:
+    """Generate text from a prompt."""
+    respond = _load_generator(args)
+    prompt = args.prompt or "The meaning of life is"
+    print(f'Prompt: "{prompt}"')
+    print("-" * 50)
+    print("Output: ", end="", flush=True)
+    respond(prompt, stream=args.stream)
+
+
+def cmd_chat(args: argparse.Namespace) -> None:
+    """Interactive chat session."""
+    respond = _load_generator(args)
+    print("=" * 50)
+    print("Interactive Chat Mode (Ctrl+C to exit)")
+    print("=" * 50)
+    print()
+    try:
+        while True:
+            prompt = input("You: ").strip()
+            if not prompt:
+                continue
+            print("\nAssistant: ", end="", flush=True)
+            respond(prompt, stream=args.stream)
+            print()
+    except (KeyboardInterrupt, EOFError):
+        print("\n\nExiting chat...")
+
+
+def cmd_models(args: argparse.Namespace) -> None:
+    """List available model aliases."""
+    from .data.registry import MODEL_REGISTRY
+
+    print()
+    print(f"  {'Alias':<16} {'Params':<8} {'Description':<50} {'HuggingFace ID'}")
+    print(f"  {'─' * 16} {'─' * 8} {'─' * 50} {'─' * 40}")
+    for alias, info in MODEL_REGISTRY.items():
+        print(
+            f"  {alias:<16} {info['params']:<8} {info['description']:<50} {info['hf_name']}"
+        )
+    print()
+    print("Usage:  lolama generate \"hello\" -m tinyllama --stream")
+    print("        lolama chat -m tinyllama")
+    print("        lolama download tinyllama")
+    print()
 
 
 def cmd_download(args: argparse.Namespace) -> None:
@@ -280,28 +306,42 @@ def main() -> None:
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
+    # Shared sampling options for generate and chat
+    def add_model_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("-m", "--model", default="tinyllama",
+                       help="Model alias, HF name, or local path (default: tinyllama)")
+        p.add_argument("--stream", action="store_true", help="Stream output tokens")
+        p.add_argument("--quantize", action="store_true", help="Use int8 quantization")
+        p.add_argument("--fast", action="store_true", help="Pre-dequantize for faster inference")
+        p.add_argument("--max-tokens", type=int, default=256, help="Max new tokens to generate")
+        p.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
+        p.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling")
+
     # generate
     gen_parser = subparsers.add_parser("generate", help="Generate text from a prompt")
     gen_parser.add_argument("prompt", nargs="?", help="The prompt to generate from")
-    gen_parser.add_argument("--model", default="TinyLlama/TinyLlama-1.1B-Chat-v1.0", help="Model name or path")
-    gen_parser.add_argument("--chat", action="store_true", help="Interactive chat mode")
-    gen_parser.add_argument("--stream", action="store_true", help="Stream output tokens")
-    gen_parser.add_argument("--quantize", action="store_true", help="Use int8 quantization")
-    gen_parser.add_argument("--fast", action="store_true", help="Pre-dequantize for faster inference")
-    gen_parser.add_argument("--max-tokens", type=int, default=256, help="Max new tokens to generate")
-    gen_parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
-    gen_parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling")
+    add_model_args(gen_parser)
     gen_parser.set_defaults(func=cmd_generate)
+
+    # chat
+    chat_parser = subparsers.add_parser("chat", help="Interactive chat session")
+    add_model_args(chat_parser)
+    chat_parser.set_defaults(func=cmd_chat, stream=True)
+
+    # models
+    models_parser = subparsers.add_parser("models", help="List available model aliases")
+    models_parser.set_defaults(func=cmd_models)
 
     # download
     dl_parser = subparsers.add_parser("download", help="Download a model from HuggingFace")
-    dl_parser.add_argument("model", help="Model key (tinyllama, open_llama_3b, open_llama_7b, llama7b)")
+    dl_parser.add_argument("model", help="Model alias (see 'lolama models' for list)")
     dl_parser.add_argument("--from-cache", action="store_true", help="Only use local HF cache")
     dl_parser.set_defaults(func=cmd_download)
 
     # quantize
     q_parser = subparsers.add_parser("quantize", help="Test int8 quantization on a model")
-    q_parser.add_argument("--model", default="TinyLlama/TinyLlama-1.1B-Chat-v1.0", help="Model name or path")
+    q_parser.add_argument("-m", "--model", default="tinyllama",
+                          help="Model alias, HF name, or local path (default: tinyllama)")
     q_parser.add_argument("--save", action="store_true", help="Save quantized model to weights/")
     q_parser.set_defaults(func=cmd_quantize)
 
