@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -74,9 +75,8 @@ class CLIPImageProcessor:
             if self.do_center_crop:
                 image = self._center_crop(image)
 
-            # Convert to tensor (H, W, C) -> (C, H, W), scale to [0, 1]
-            tensor = torch.tensor(list(image.getdata()), dtype=torch.float32)
-            tensor = tensor.view(image.height, image.width, 3)
+            # Convert to tensor via numpy (H, W, C) -> (C, H, W), scale to [0, 1]
+            tensor = torch.from_numpy(np.array(image)).float()
             tensor = tensor.permute(2, 0, 1) / 255.0
 
             # Normalize

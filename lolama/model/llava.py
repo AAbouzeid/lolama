@@ -112,6 +112,15 @@ class LLaVA(nn.Module):
         image_token_id = self._vlm_config.image_token_id
         device = input_ids.device
 
+        # Validate: each sample must have exactly one <image> token
+        image_counts = (input_ids == image_token_id).sum(dim=1)
+        if (image_counts != 1).any():
+            bad = [(i, c.item()) for i, c in enumerate(image_counts) if c != 1]
+            raise ValueError(
+                f"Expected exactly 1 <image> token per sample, got: {bad}. "
+                f"Multi-image is not supported."
+            )
+
         text_embeds = self.language_model.embed_tokens(input_ids)
 
         new_seq_len = seq_len - 1 + num_img
@@ -230,7 +239,10 @@ class LLaVA(nn.Module):
 
             # Offload vision tower to CPU — it's no longer needed until next image
             self.vision_tower.to("cpu")
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif hasattr(torch, "mps") and torch.backends.mps.is_available():
+                torch.mps.empty_cache()
             logger.debug("Vision tower offloaded to CPU")
 
             # Forward through LLM

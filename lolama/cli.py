@@ -315,18 +315,36 @@ def cmd_generate(args: argparse.Namespace) -> None:
 
 def cmd_chat(args: argparse.Namespace) -> None:
     """Interactive chat session."""
+    is_vlm = _is_vlm_model(args.model)
     respond = _load_generator(args)
     print("=" * 50)
     print("Interactive Chat Mode (Ctrl+C to exit)")
+    if is_vlm:
+        print("  /image <path>  Load an image for the next question")
     print("=" * 50)
     print()
+
+    pending_image: str | None = None
     try:
         while True:
             prompt = input("You: ").strip()
             if not prompt:
                 continue
+
+            # Handle /image command for VLMs
+            if is_vlm and prompt.startswith("/image "):
+                pending_image = prompt[len("/image "):].strip()
+                if not Path(pending_image).exists():
+                    print(f"  Image not found: {pending_image}")
+                    pending_image = None
+                else:
+                    print(f"  Image loaded: {pending_image}")
+                    print("  (Ask a question about it)")
+                continue
+
             print("\nAssistant: ", end="", flush=True)
-            respond(prompt, stream=not args.no_stream)
+            respond(prompt, stream=not args.no_stream, image_path=pending_image)
+            pending_image = None
             print()
     except (KeyboardInterrupt, EOFError):
         print("\n\nExiting chat...")
