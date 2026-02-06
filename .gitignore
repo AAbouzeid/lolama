@@ -28,4 +28,3 @@ venv/
 # Temp files
 *.log
 *.txt
-!requirements.txt
