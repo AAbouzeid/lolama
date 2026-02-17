@@ -115,10 +115,11 @@ class TextGenerator:
         )
 
         # First forward pass - include pixel_values for VLMs
+        logits: torch.Tensor
         if pixel_values is not None:
-            logits: torch.Tensor = self.model(input_ids, pixel_values=pixel_values, kv_caches=kv_caches)
+            logits = self.model(input_ids, pixel_values=pixel_values, kv_caches=kv_caches)
         else:
-            logits: torch.Tensor = self.model(input_ids, kv_caches=kv_caches)
+            logits = self.model(input_ids, kv_caches=kv_caches)
 
         for _ in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
@@ -198,10 +199,11 @@ class TextGenerator:
         )
 
         # Initial forward pass (populates cache) - include pixel_values for VLMs
+        logits: torch.Tensor
         if pixel_values is not None:
-            logits: torch.Tensor = self.model(input_ids, pixel_values=pixel_values, kv_caches=kv_caches)
+            logits = self.model(input_ids, pixel_values=pixel_values, kv_caches=kv_caches)
         else:
-            logits: torch.Tensor = self.model(input_ids, kv_caches=kv_caches)
+            logits = self.model(input_ids, kv_caches=kv_caches)
 
         for _ in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
@@ -221,7 +223,7 @@ class TextGenerator:
             logits = self.model(next_token, kv_caches=kv_caches)
 
             # Extract token (forces sync, but next forward is already queued)
-            token_id: int = next_token.item()
+            token_id: int = int(next_token.item())
 
             if config.eos_token_id is not None and token_id == config.eos_token_id:
                 break
@@ -327,7 +329,7 @@ class TextGenerator:
             # Store generated tokens (only for unfinished sequences)
             for i in range(batch_size):
                 if not finished[i]:
-                    generated_tokens[i].append(next_token[i].item())
+                    generated_tokens[i].append(int(next_token[i].item()))
 
             # Check for EOS
             if config.eos_token_id is not None:

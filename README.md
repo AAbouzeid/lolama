@@ -459,7 +459,7 @@ lolama/
 
 - Python 3.10+
 - PyTorch 2.0+
-- Transformers 4.30+ (for tokenizers and weight loading)
+- Transformers 4.39+ (for tokenizer compatibility and weight loading)
 - Pillow (for VLM image loading)
 - safetensors (for efficient VLM weight loading)
 - CUDA 11.7+ (optional, for GPU acceleration)

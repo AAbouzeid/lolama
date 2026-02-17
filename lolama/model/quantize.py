@@ -273,11 +273,18 @@ class QuantizedLinear(nn.Module):
         else:
             out_normal = self._forward_naive(x_normal)
 
-        # fp16 matmul on outlier columns (tiny, ~6-20 cols)
-        out_outlier: torch.Tensor = F.linear(
-            x_outlier.to(self.weight_outlier_fp16.dtype),
-            self.weight_outlier_fp16,
-        )
+        # Outlier matmul is tiny (~6-20 cols). CPU backends may not support
+        # fp16 GEMM, so use fp32 there and keep fp16/bf16 on accelerators.
+        if x_outlier.device.type == "cpu":
+            out_outlier: torch.Tensor = F.linear(
+                x_outlier.float(),
+                self.weight_outlier_fp16.float(),
+            )
+        else:
+            out_outlier = F.linear(
+                x_outlier.to(self.weight_outlier_fp16.dtype),
+                self.weight_outlier_fp16,
+            )
 
         return out_normal + out_outlier.to(out_normal.dtype)
 

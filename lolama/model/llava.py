@@ -130,7 +130,7 @@ class LLaVA(nn.Module):
         )
 
         for i in range(batch_size):
-            image_pos = (input_ids[i] == image_token_id).nonzero(as_tuple=True)[0][0].item()
+            image_pos: int = int((input_ids[i] == image_token_id).nonzero(as_tuple=True)[0][0].item())
 
             # Text before <image>
             if image_pos > 0:
@@ -200,6 +200,9 @@ class LLaVA(nn.Module):
         Returns:
             logits: (B, L, vocab_size) or (B, L', vocab_size) if image was merged
         """
+        if inputs_embeds is None and input_ids is None:
+            raise ValueError("Must provide either input_ids or inputs_embeds")
+
         # Handle inputs_embeds directly (for advanced usage)
         if inputs_embeds is not None:
             return self.language_model(
@@ -212,6 +215,10 @@ class LLaVA(nn.Module):
         has_images = pixel_values is not None and not self._image_features_cached
 
         if has_images:
+            if input_ids is None:
+                raise ValueError("input_ids is required when pixel_values is provided")
+            assert pixel_values is not None
+
             # Encode images
             logger.debug("Encoding image through vision tower...")
             image_features = self.encode_images(pixel_values)

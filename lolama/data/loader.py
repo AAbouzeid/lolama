@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import transformers
 
 from ..model import Llama, LlamaConfig
 from ..utils.logging import get_data_logger
@@ -92,18 +93,28 @@ def load_tokenizer(
         try:
             tokenizer = AutoTokenizer.from_pretrained(source["local_path"])
         except ValueError:
-            # Tokenizer config may reference a class from a newer transformers version
-            # (e.g. "TokenizersBackend" from transformers 5.x). Fix by patching the
-            # saved config to remove the unknown class and let AutoTokenizer auto-detect.
-            import json
-            cfg_path = Path(source["local_path"]) / "tokenizer_config.json"
-            if cfg_path.exists():
-                cfg = json.loads(cfg_path.read_text())
-                cfg.pop("tokenizer_class", None)
-                cfg_path.write_text(json.dumps(cfg, indent=4))
-                tokenizer = AutoTokenizer.from_pretrained(source["local_path"])
-            else:
-                raise
+            # Some local tokenizers contain fast-backend metadata incompatible
+            # with older stacks. Retry with the slow tokenizer without mutating files.
+            tokenizer = AutoTokenizer.from_pretrained(
+                source["local_path"],
+                use_fast=False,
+            )
+        except Exception:
+            # Some environments have fast-tokenizer parsing incompatibilities
+            # (e.g., tokenizer.json ModelWrapper errors). Fall back to slow.
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    source["local_path"],
+                    use_fast=False,
+                )
+            except Exception as slow_error:
+                raise RuntimeError(
+                    "Failed to load tokenizer from local files. "
+                    "This commonly happens with older tokenizer stacks. "
+                    f"Installed transformers={transformers.__version__}. "
+                    "Please use transformers>=4.39.0 (and a recent tokenizers build), "
+                    "or re-download model tokenizer files."
+                ) from slow_error
     else:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
@@ -117,6 +128,22 @@ def load_tokenizer(
                 trust_remote_code=trust_remote_code,
                 local_files_only=False,
             )
+        except Exception:
+            # Retry with slow tokenizer first from local cache, then online.
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    source["hf_name"],
+                    trust_remote_code=trust_remote_code,
+                    local_files_only=True,
+                    use_fast=False,
+                )
+            except OSError:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    source["hf_name"],
+                    trust_remote_code=trust_remote_code,
+                    local_files_only=False,
+                    use_fast=False,
+                )
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

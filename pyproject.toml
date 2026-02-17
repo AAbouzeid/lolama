@@ -26,7 +26,8 @@ classifiers = [
 ]
 dependencies = [
     "torch>=2.0.0",
-    "transformers>=4.30.0",
+    "transformers>=4.39.0",
+    "tokenizers>=0.15.0",
     "numpy>=1.24.0",
     "matplotlib>=3.7.0",
     "Pillow>=9.0.0",
@@ -71,3 +72,21 @@ ignore = [
     "W293",   # whitespace before ':'
     "E303",   # too many blank lines
 ]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = [
+    "lolama.cli",
+    "lolama.data.loader",
+    "lolama.data.registry",
+    "lolama.data.vlm_loader",
+    "lolama.model.layers",
+    "lolama.model.llama",
+    "lolama.model.quantize",
+    "lolama.vision.clip",
+]
+ignore_errors = true
