@@ -2,6 +2,7 @@
 
 **A from-scratch PyTorch implementation of the LLaMA architecture with Hugging Face weight compatibility. Now with vision-language model (LLaVA) support.**
 
+[![Tests](https://github.com/AAbouzeid/lolama/actions/workflows/tests.yml/badge.svg)](https://github.com/AAbouzeid/lolama/actions/workflows/tests.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -20,15 +21,27 @@
 
 ---
 
-## Quick Start
-
-### Installation
+## 60-Second Quickstart
 
 ```bash
-git clone https://github.com/AAbouzeid/lolama.git
-cd lolama
-pip install -e .
+# 1. Install
+git clone https://github.com/AAbouzeid/lolama.git && cd lolama && pip install -e .
+
+# 2. Generate (downloads TinyLlama 1.1B on first run, ~2 GB)
+lolama generate "The capital of France is"
 ```
+
+**Expected output** (greedy, deterministic):
+
+```
+The capital of France is Paris. It is located in the Île-de-France
+```
+
+The command should print streaming tokens and exit 0. If you see `Paris` in the output, everything works.
+
+---
+
+## Quick Start
 
 ### Generate Text
 
@@ -291,6 +304,49 @@ The CLI handles `<image>` insertion automatically when you pass `--image`.
 
 ---
 
+## Correctness
+
+Every commit is tested on CPU across Python 3.10-3.12. No GPU or model download required — all tests use a tiny 2-layer LLaMA config that runs in seconds.
+
+### Logits parity vs HuggingFace Transformers
+
+A tiny LLaMA is created in both HF `LlamaForCausalLM` and lolama `Llama`, weights are copied exactly, and forward-pass logits are compared on identical inputs:
+
+| Test | Input | Tolerance (fp32, CPU) |
+|------|-------|-----------------------|
+| Single token | `[42]` | atol=1e-4, rtol=1e-4 |
+| Short sequence | `[10, 20, 30, 40, 50]` | atol=1e-4, rtol=1e-4 |
+| Batched | `[[10,20,30], [40,50,60]]` | atol=1e-4, rtol=1e-4 |
+| Argmax identical | 6-token sequence | exact match |
+
+### Generation parity
+
+Greedy decoding through our KV-cached `TextGenerator` produces **token-identical** output compared to step-by-step greedy with HF (no cache, full recompute each step). Any divergence would reveal a KV-cache or positional-encoding bug.
+
+Tested on 2 different prompts, 10 tokens each.
+
+### Test coverage
+
+```
+pytest tests/ -v          # full suite — 113 tests, <4s on CPU
+```
+
+| File | What it tests |
+|------|---------------|
+| `test_parity.py` | Logits + greedy generation parity vs HF Transformers |
+| `test_quantize.py` | Int8 roundtrip accuracy, outlier detection, model size reduction |
+| `test_model.py` | Forward shapes, batching, KV cache creation, parameter counting |
+| `test_layers.py` | RMSNorm, SwiGLU, LlamaAttention (incl. KV cache prefill/decode), LlamaBlock residuals |
+| `test_kv_cache.py` | Sequential updates, shape correctness, reset, `repeat_kv` for GQA |
+| `test_rope.py` | Precomputed frequency shapes/ranges, `apply_rope` shape preservation, `rotate_half` known values |
+| `test_sampler.py` | Greedy, top-k, top-p, repetition penalty |
+| `test_config.py` | Config validation (divisibility constraints, GQA, defaults) |
+| `test_generation_config.py` | Generation parameter validation, `greedy()`/`sampling()` constructors |
+| `test_clip.py` | Full CLIP ViT pipeline: embeddings, attention, MLP, encoder, projector |
+| `test_llava.py` | LLaVA end-to-end: image encoding, `<image>` token merging, text+image forward, streaming |
+
+---
+
 ## Quantization
 
 Reduce memory usage with int8 weight-only quantization:
@@ -313,6 +369,28 @@ print(f"Quantized: {get_model_size_mb(model):.0f} MB")  # ~2x smaller (fp16 → 
   - **MPS (Apple Silicon)**: Metal fused W8A16 kernel — dequantization in GPU registers, no fp16 materialized in DRAM
   - **CUDA**: `torch._int_mm` W8A8 — dynamic per-token activation quantization + int8 GEMM
   - **CPU**: Naive dequant to fp16 fallback
+
+---
+
+## Benchmarks
+
+TinyLlama 1.1B, batch size 1, 128-token prefill, 64-token decode.
+Measured on **Apple M1 / 16 GB** (MPS backend). Numbers will vary by hardware — run the script below to get your own.
+
+| Config | Prefill (tok/s) | Decode (tok/s) | Model Size (MB) |
+|--------|----------------:|---------------:|----------------:|
+| FP16   |             328 |             12 |           2,201 |
+| INT8   |             143 |              4 |           1,233 |
+
+INT8 is **44% smaller** in memory. Decode is slower because weight-only quantization trades compute for memory — the win is fitting larger models on constrained devices (e.g., 7B on an 8 GB Mac or 16 GB GPU).
+
+**Reproduce:**
+
+```bash
+python benchmarks/run_bench.py                # auto-detect device
+python benchmarks/run_bench.py --device cuda   # force CUDA
+python benchmarks/run_bench.py --device cpu    # CPU baseline
+```
 
 ---
 
@@ -370,7 +448,8 @@ lolama/
 │   │   ├── device.py        # Auto device detection
 │   │   └── logging.py       # Logging utilities
 │   └── cli.py               # Command-line interface
-├── tests/                   # Comprehensive test suite
+├── tests/                   # 113 tests — parity, quantization, layers, vision (see Correctness)
+├── benchmarks/              # Throughput & memory benchmarks (see Benchmarks)
 └── weights/                 # Local model storage
 ```
 
@@ -393,8 +472,14 @@ lolama/
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run tests
+# Run all 113 tests (~4s, CPU-only, no model downloads)
 pytest tests/ -v
+
+# Smoke test — stop on first failure
+pytest tests/ -x
+
+# Lint
+ruff check lolama/ tests/
 
 # Type checking
 mypy lolama/

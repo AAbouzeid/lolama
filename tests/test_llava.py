@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from lolama.model.vlm_config import VisionConfig, VLMConfig
+from lolama.model.vlm_config import VLMConfig
 from lolama.model.llava import LLaVA
 from lolama.model.generator import TextGenerator
 from lolama.vision.processor import CLIPImageProcessor

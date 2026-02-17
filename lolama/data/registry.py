@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+
 MODEL_REGISTRY: dict[str, dict[str, str | bool]] = {
     "tinyllama": {
         "hf_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
@@ -55,3 +58,43 @@ MODEL_REGISTRY: dict[str, dict[str, str | bool]] = {
         "download_size": "14 GB",
     },
 }
+
+
+def _weights_dir() -> Path:
+    return Path(__file__).parent.parent.parent / "weights"
+
+
+def _canonical_folder(model_path: str) -> str:
+    """Resolve any model reference to its canonical folder name.
+
+    Priority:
+      1. Registry alias  (e.g. "tinyllama" → "tinyllama-1.1b")
+      2. Registry lookup by folder name (e.g. "weights/tinyllama-1.1b" → "tinyllama-1.1b")
+      3. Registry lookup by HF name (e.g. "TinyLlama/TinyLlama-1.1B-Chat-v1.0" → "tinyllama-1.1b")
+      4. Fallback: basename of local path or sanitized string
+    """
+    key = model_path.lower()
+
+    # 1. Direct alias match
+    if key in MODEL_REGISTRY:
+        return MODEL_REGISTRY[key]["folder"]
+
+    # 2/3. Match by folder name or HF name
+    basename = Path(model_path).name if Path(model_path).exists() else model_path
+    for info in MODEL_REGISTRY.values():
+        if info["folder"] == basename or info["hf_name"] == model_path:
+            return info["folder"]
+
+    # 4. Fallback
+    p = Path(model_path)
+    return p.name if p.exists() else model_path.replace("/", "_").replace("\\", "_")
+
+
+def get_quantized_dir(model_path: str, suffix: str = "int8") -> Path:
+    """Single source of truth for quantized model directory naming.
+
+    Always resolves through the registry so "tinyllama", "weights/tinyllama-1.1b",
+    and "TinyLlama/TinyLlama-1.1B-Chat-v1.0" all map to the same dir.
+    """
+    folder = _canonical_folder(model_path)
+    return _weights_dir() / f"{folder}-{suffix}"

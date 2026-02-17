@@ -41,9 +41,14 @@ class GenerationConfig:
         """Validate configuration."""
         if self.max_new_tokens < 1:
             raise ValueError(f"max_new_tokens must be >= 1, got {self.max_new_tokens}")
-        
-        if self.temperature <= 0:
-            raise ValueError(f"temperature must be > 0, got {self.temperature}")
+
+        # temperature=0 → greedy decoding (same convention as OpenAI, vLLM, etc.)
+        if self.temperature == 0:
+            self.temperature = 1.0
+            self.do_sample = False
+
+        if self.temperature < 0:
+            raise ValueError(f"temperature must be >= 0, got {self.temperature}")
         
         if self.top_k is not None and self.top_k < 1:
             raise ValueError(f"top_k must be >= 1, got {self.top_k}")

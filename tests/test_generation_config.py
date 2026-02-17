@@ -13,9 +13,15 @@ def test_max_new_tokens_invalid():
         GenerationConfig(max_new_tokens=0)
 
 
-def test_temperature_invalid():
+def test_temperature_zero_is_greedy():
+    config = GenerationConfig(temperature=0.0)
+    assert config.do_sample is False
+    assert config.temperature == 1.0
+
+
+def test_temperature_negative_invalid():
     with pytest.raises(ValueError):
-        GenerationConfig(temperature=0.0)
+        GenerationConfig(temperature=-0.1)
 
 
 def test_top_k_invalid():

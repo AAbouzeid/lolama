@@ -10,7 +10,7 @@ from .loader import (
     download_model,
     WeightLoadingError,
 )
-from .registry import MODEL_REGISTRY
+from .registry import MODEL_REGISTRY, get_quantized_dir
 
 # VLM loading
 from .vlm_loader import (
@@ -32,6 +32,7 @@ __all__ = [
     'download_model',
     'WeightLoadingError',
     'MODEL_REGISTRY',
+    'get_quantized_dir',
     # VLM loading
     'create_vlm_config_from_hf',
     'build_llava_weight_mapping',

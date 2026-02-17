@@ -24,10 +24,9 @@ import torch
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
-WEIGHTS_DIR = PROJECT_ROOT / "weights"
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from lolama.data import create_model, load_model, load_tokenizer, resolve_model_source
+from lolama.data import create_model, load_model, load_tokenizer, resolve_model_source, get_quantized_dir
 from lolama.model import (
     quantize_model_int8,
     dequantize_model_for_inference,
@@ -39,16 +38,6 @@ from lolama.model import (
 )
 from lolama.utils import resolve_device
 
-
-def get_quantized_dir(model_path: str) -> Path:
-    """Get the directory where quantized model would be saved."""
-    path = Path(model_path)
-    if path.exists():
-        name = path.name
-    else:
-        name = model_path.replace("/", "_").replace("\\", "_")
-
-    return WEIGHTS_DIR / f"{name}-int8"
 
 
 def get_source_dir(model_path: str) -> Path | None:
@@ -233,6 +222,12 @@ def main() -> None:
         fast_mode = True
         args.remove("--fast")
 
+    outlier_threshold: float = 0.0
+    if "--outlier-threshold" in args:
+        idx_ot: int = args.index("--outlier-threshold")
+        outlier_threshold = float(args[idx_ot + 1])
+        args = args[:idx_ot] + args[idx_ot+2:]
+
     if "--model" in args:
         idx: int = args.index("--model")
         model_path = args[idx + 1]
@@ -253,7 +248,8 @@ def main() -> None:
     if quantize and is_quantized_model_dir(str(quantized_dir)):
         print(f"Found saved quantized model: {quantized_dir}/")
         model = create_model(model_path)
-        quantize_model_int8(model, skip_layers=['lm_head', 'embed_tokens'])
+        quantize_model_int8(model, skip_layers=['lm_head', 'embed_tokens'],
+                            outlier_threshold=outlier_threshold)
         load_quantized_model(str(quantized_dir), model)
         model = model.to(device)
 
@@ -265,7 +261,8 @@ def main() -> None:
         model = load_model(model_path, device=device)
         size_before: float = get_model_size_mb(model)
         print(f"Quantizing model (before: {size_before:.1f} MB)...")
-        quantize_model_int8(model, skip_layers=['lm_head', 'embed_tokens'])
+        quantize_model_int8(model, skip_layers=['lm_head', 'embed_tokens'],
+                            outlier_threshold=outlier_threshold)
 
         source_dir: Path | None = get_source_dir(model_path)
         print(f"\nSaving quantized model to {quantized_dir}/")

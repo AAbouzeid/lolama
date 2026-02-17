@@ -37,6 +37,7 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "ruff>=0.4.0",
 ]
 
 [project.scripts]
@@ -54,3 +55,19 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = [
+    "E501",   # line too long — handled by formatter
+    "E741",   # ambiguous variable name (we use l, O, I in math code)
+    "F811",   # redefinition — used intentionally with type annotations
+    "F841",   # local variable assigned but never used — common in unpacking
+    "W291",   # trailing whitespace
+    "W293",   # whitespace before ':'
+    "E303",   # too many blank lines
+]

@@ -15,7 +15,7 @@ def _confirm_download(model_path: str) -> None:
     Only registry aliases and local paths are allowed. Arbitrary HF model
     names are rejected.
     """
-    from .data import resolve_model_source, download_model, download_llava_model
+    from .data import download_model, download_llava_model
     from .data.registry import MODEL_REGISTRY
 
     # Local path — always allowed
@@ -77,7 +77,7 @@ def _is_vlm_model(model_name: str) -> bool:
 
 def _load_generator(args: argparse.Namespace):
     """Shared model/tokenizer setup for generate and chat commands."""
-    from .data import create_model, load_model, load_tokenizer, resolve_model_source
+    from .data import create_model, load_model, load_tokenizer, resolve_model_source, get_quantized_dir
     from .model import (
         TextGenerator,
         apply_quantization_structure,
@@ -96,7 +96,6 @@ def _load_generator(args: argparse.Namespace):
     device = resolve_device()
     logger.info(f"Device: {device}")
 
-    weights_dir = Path(__file__).parent.parent / "weights"
     model_path = args.model
 
     # Check if this is a VLM model
@@ -112,9 +111,7 @@ def _load_generator(args: argparse.Namespace):
 
         if args.quantize:
             # Check for saved quantized LLM weights
-            p = Path(model_path)
-            vlm_name = p.name if p.exists() else model_path.replace("/", "_").replace("\\", "_")
-            vlm_quantized_dir = weights_dir / f"{vlm_name}-vlm-int8"
+            vlm_quantized_dir = get_quantized_dir(model_path, suffix="vlm-int8")
 
             if is_quantized_model_dir(str(vlm_quantized_dir)):
                 # Fast path: load only vision/projector weights (LLM stays on meta),
@@ -136,6 +133,7 @@ def _load_generator(args: argparse.Namespace):
                 quantize_model_int8(
                     model.language_model,
                     skip_layers=["lm_head", "embed_tokens"],
+                    outlier_threshold=args.outlier_threshold,
                 )
                 source = resolve_model_source(model_path)
                 source_dir = source["local_path"]
@@ -169,18 +167,14 @@ def _load_generator(args: argparse.Namespace):
             pixel_values = processed["pixel_values"].to(device, dtype=model.dtype)
             logger.info(f"Image preprocessed: {pixel_values.shape}, dtype: {pixel_values.dtype}")
     else:
-        def get_quantized_dir(mp: str) -> Path:
-            p = Path(mp)
-            name = p.name if p.exists() else mp.replace("/", "_").replace("\\", "_")
-            return weights_dir / f"{name}-int8"
-
         quantized_dir = get_quantized_dir(model_path)
 
         if args.quantize and is_quantized_model_dir(str(quantized_dir)):
             logger.info(f"Found saved quantized model: {quantized_dir}/")
             model = create_model(model_path)
             logger.info("Applying int8 quantization structure...")
-            quantize_model_int8(model, skip_layers=["lm_head", "embed_tokens"])
+            quantize_model_int8(model, skip_layers=["lm_head", "embed_tokens"],
+                               outlier_threshold=args.outlier_threshold)
             logger.info("Loading quantized weights...")
             load_quantized_model(str(quantized_dir), model)
             logger.info(f"Moving model to {device}...")
@@ -190,7 +184,8 @@ def _load_generator(args: argparse.Namespace):
             model = load_model(model_path, device=device)
             size_before = get_model_size_mb(model)
             logger.info(f"Quantizing model (before: {size_before:.1f} MB)...")
-            quantize_model_int8(model, skip_layers=["lm_head", "embed_tokens"])
+            quantize_model_int8(model, skip_layers=["lm_head", "embed_tokens"],
+                               outlier_threshold=args.outlier_threshold)
             source = resolve_model_source(model_path)
             source_dir = source["local_path"]
             logger.info(f"Saving quantized model to {quantized_dir}/")
@@ -263,7 +258,7 @@ def _load_generator(args: argparse.Namespace):
             ):
                 token_count += 1
                 if token_count == 1:
-                    logger.info(f"First token generated (prefill done)")
+                    logger.info("First token generated (prefill done)")
                 generated_tokens.append(token_id)
                 full_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
                 print(full_text[len(prev_text):], end="", flush=True)
@@ -439,6 +434,8 @@ def main() -> None:
                        help="Model alias or local path (default: tinyllama)")
         p.add_argument("--no-stream", action="store_true", help="Disable streaming (wait for full response)")
         p.add_argument("--quantize", action="store_true", help="Use int8 quantization")
+        p.add_argument("--outlier-threshold", type=float, default=0.0,
+                       help="Outlier detection threshold for mixed-precision quantization (0=disabled, try 6.0)")
         p.add_argument("--max-tokens", type=int, default=256, help="Max new tokens to generate")
         p.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
         p.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling")

@@ -1,5 +1,4 @@
 import pytest
-import torch
 
 from lolama.model.config import LlamaConfig
 from lolama.model.vlm_config import VisionConfig, VLMConfig

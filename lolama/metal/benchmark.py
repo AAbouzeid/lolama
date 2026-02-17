@@ -105,7 +105,7 @@ def test_correctness(device: str, dtype: torch.dtype = torch.float16):
             print(f"  torch._int_mm: [ERROR - {e}]")
 
     # Batched input test
-    print(f"\n  Batched input test (3D):")
+    print("\n  Batched input test (3D):")
     x_batched = torch.randn(2, M, K, device=device, dtype=dtype)
     ref_batched = naive_dequant_matmul(
         x_batched.reshape(-1, K), w_int8, scales,
@@ -184,7 +184,7 @@ def main():
         # CPU doesn't have accelerated paths, only test naive
         if device == "cpu":
             print(f"\n{'='*60}")
-            print(f"CPU: naive path only (baseline)")
+            print("CPU: naive path only (baseline)")
             print(f"{'='*60}")
             x, w_int8, scales = make_test_data(32, 4096, 4096, device)
             t = benchmark_fn(naive_dequant_matmul, x, w_int8, scales, device=device)

@@ -89,7 +89,21 @@ def load_tokenizer(
     source = resolve_model_source(model_name_or_path)
 
     if source["local_path"] is not None:
-        tokenizer = AutoTokenizer.from_pretrained(source["local_path"])
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(source["local_path"])
+        except ValueError:
+            # Tokenizer config may reference a class from a newer transformers version
+            # (e.g. "TokenizersBackend" from transformers 5.x). Fix by patching the
+            # saved config to remove the unknown class and let AutoTokenizer auto-detect.
+            import json
+            cfg_path = Path(source["local_path"]) / "tokenizer_config.json"
+            if cfg_path.exists():
+                cfg = json.loads(cfg_path.read_text())
+                cfg.pop("tokenizer_class", None)
+                cfg_path.write_text(json.dumps(cfg, indent=4))
+                tokenizer = AutoTokenizer.from_pretrained(source["local_path"])
+            else:
+                raise
     else:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
@@ -112,6 +126,29 @@ def load_tokenizer(
 class WeightLoadingError(Exception):
     """Raised when weight loading fails to meet the required threshold."""
     pass
+
+
+def _load_hf_state_dict(
+    hf_model_path: str | Path,
+    trust_remote_code: bool = False,
+    local_files_only: bool = False,
+) -> dict[str, torch.Tensor]:
+    """Load an HF-keyed state dict, preferring direct safetensors over model instantiation."""
+    path = Path(hf_model_path)
+    safetensors_file = path / "model.safetensors"
+    if safetensors_file.exists():
+        from safetensors.torch import load_file
+        logger.info(f"Loading weights from {safetensors_file} (direct)")
+        return load_file(str(safetensors_file))
+
+    # Fallback: instantiate HF model to extract state dict
+    logger.info(f"Loading weights from {hf_model_path} (via HF model)...")
+    hf_model = _try_from_pretrained(
+        str(hf_model_path),
+        trust_remote_code=trust_remote_code,
+        local_files_only=local_files_only,
+    )
+    return hf_model.state_dict()
 
 
 def load_weights_from_hf(
@@ -137,14 +174,11 @@ def load_weights_from_hf(
     Raises:
         WeightLoadingError: If match rate falls below strict_threshold
     """
-    logger.info(f"Loading weights from {hf_model_path}...")
-    hf_model = _try_from_pretrained(
+    hf_state = _load_hf_state_dict(
         hf_model_path,
         trust_remote_code=trust_remote_code,
         local_files_only=local_files_only,
     )
-
-    hf_state = hf_model.state_dict()
 
     # Build mapping (HF key -> Our key)
     mapping: dict[str, str] = {}

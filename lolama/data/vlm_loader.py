@@ -13,7 +13,6 @@ from ..model import LlamaConfig
 from ..model.vlm_config import VisionConfig, VLMConfig
 from ..model.llava import LLaVA
 from ..utils.logging import get_data_logger
-from .registry import MODEL_REGISTRY
 from .loader import resolve_model_source, WEIGHTS_DIR, WeightLoadingError
 
 logger = get_data_logger()
