@@ -75,8 +75,11 @@ def _is_vlm_model(model_name: str) -> bool:
     return info.get("model_type") == "vlm"
 
 
-def _load_generator(args: argparse.Namespace):
-    """Shared model/tokenizer setup for generate and chat commands."""
+def _setup_responder(args: argparse.Namespace):
+    """Shared model/tokenizer setup for generate and chat commands.
+
+    Returns a ``respond(prompt, stream, image_path=None)`` callable.
+    """
     from .data import create_model, load_model, load_tokenizer, resolve_model_source, get_quantized_dir
     from .model import (
         TextGenerator,
@@ -198,6 +201,13 @@ def _load_generator(args: argparse.Namespace):
     logger.info("Creating text generator...")
     generator = TextGenerator(model)
 
+    # Resolve max context length once for validation
+    _model_config = generator.config
+    _max_ctx: int = (
+        getattr(_model_config, 'max_seq_len', 0)
+        or getattr(getattr(_model_config, 'llm_config', None), 'max_seq_len', 0)
+    )
+
     def tokenize_prompt(prompt: str) -> torch.Tensor:
         # For VLMs, ensure <image> token is in the prompt
         if is_vlm and pixel_values is not None and "<image>" not in prompt:
@@ -211,13 +221,21 @@ def _load_generator(args: argparse.Namespace):
             )
             if not isinstance(input_ids, torch.Tensor):
                 input_ids = input_ids["input_ids"]
-            return input_ids.to(device)
+        else:
+            # No chat template — apply default instruct format for VLM models
+            if is_vlm:
+                prompt = f"[INST] {prompt} [/INST]"
+            input_ids = tokenizer.encode(prompt, return_tensors="pt")
 
-        # No chat template — apply default instruct format for VLM models
-        if is_vlm:
-            prompt = f"[INST] {prompt} [/INST]"
+        # Fail fast if prompt alone exceeds context window
+        prompt_len = input_ids.shape[-1]
+        if _max_ctx > 0 and prompt_len >= _max_ctx:
+            raise ValueError(
+                f"Prompt is {prompt_len} tokens, which already exceeds the "
+                f"model context window ({_max_ctx}). Shorten your prompt."
+            )
 
-        return tokenizer.encode(prompt, return_tensors="pt").to(device)
+        return input_ids.to(device)
 
     logger.info("Ready.")
 
@@ -295,7 +313,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
         print("       echo \"your prompt\" | lolama generate")
         sys.exit(1)
 
-    respond = _load_generator(args)
+    respond = _setup_responder(args)
     print(f'Prompt: "{prompt}"')
     if hasattr(args, "image") and args.image:
         print(f"Image: {args.image}")
@@ -309,7 +327,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
 def cmd_chat(args: argparse.Namespace) -> None:
     """Interactive chat session."""
     is_vlm = _is_vlm_model(args.model)
-    respond = _load_generator(args)
+    respond = _setup_responder(args)
     print("=" * 50)
     print("Interactive Chat Mode (Ctrl+C to exit)")
     if is_vlm:

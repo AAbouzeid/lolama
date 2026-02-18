@@ -79,81 +79,103 @@ def _try_from_pretrained(
     )
 
 
+def _try_tokenizer_strategies(
+    path_or_name: str | Path,
+    trust_remote_code: bool,
+    strategies: list[dict],
+) -> AutoTokenizer:
+    """Try loading a tokenizer using a ranked list of strategies.
+
+    Each strategy dict may contain ``use_fast`` and ``local_files_only``.
+
+    Fallback policy:
+      - **OSError** (files not found): skip remaining strategies at this
+        locality. Also skip fast strategies at the next locality if the
+        fast tokenizer already failed with a parse error (no point retrying).
+      - **Other exceptions** (parse failures): try the next strategy in
+        order (typically the slow-tokenizer variant at the same locality).
+
+    Returns the first tokenizer that loads successfully.
+    Raises RuntimeError if all strategies fail.
+    """
+    last_error: Exception | None = None
+    skip: set[int] = set()  # strategy indices to skip
+    fast_parse_failed: bool = False  # fast tokenizer had a parse error
+
+    for i, strategy in enumerate(strategies):
+        if i in skip:
+            continue
+
+        try:
+            tok = AutoTokenizer.from_pretrained(
+                path_or_name,
+                trust_remote_code=trust_remote_code,
+                **strategy,
+            )
+            if i > 0:
+                logger.debug(f"Tokenizer loaded via fallback strategy #{i}: {strategy}")
+            return tok
+        except OSError as e:
+            last_error = e
+            logger.debug(f"Tokenizer strategy #{i} ({strategy}) OSError: {e}")
+            # Files missing at this locality — skip all remaining
+            # strategies here, and skip fast at the next locality if
+            # fast already failed with a parse error.
+            cur_local = strategy.get("local_files_only", False)
+            for j in range(i + 1, len(strategies)):
+                sj = strategies[j]
+                if sj.get("local_files_only", False) == cur_local:
+                    skip.add(j)
+                elif fast_parse_failed and sj.get("use_fast") is not False:
+                    skip.add(j)
+            continue
+        except Exception as e:
+            last_error = e
+            logger.debug(f"Tokenizer strategy #{i} ({strategy}) failed: {e}")
+            if strategy.get("use_fast") is not False:
+                fast_parse_failed = True
+            continue
+
+    raise RuntimeError(
+        f"Failed to load tokenizer from '{path_or_name}'. "
+        f"Installed transformers={transformers.__version__}. "
+        "Please use transformers>=4.39.0 (and a recent tokenizers build), "
+        "or re-download model tokenizer files."
+    ) from last_error
+
+
 def load_tokenizer(
     model_name_or_path: str,
     trust_remote_code: bool = False,
 ) -> AutoTokenizer:
-    """Load tokenizer with priority: weights/ -> cache -> download."""
+    """Load tokenizer with priority: weights/ -> cache -> download.
+
+    Strategies tried in order (OSError skips locality, parse errors try slow):
+      Local path:  fast -> slow
+      Remote name: local-fast -> local-slow -> online-fast -> online-slow
+    """
     source = resolve_model_source(model_name_or_path)
 
     if source["local_path"] is not None:
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(source["local_path"])
-        except ValueError:
-            # Some local tokenizers contain fast-backend metadata incompatible
-            # with older stacks. Retry with the slow tokenizer without mutating files.
-            tokenizer = AutoTokenizer.from_pretrained(
-                source["local_path"],
-                use_fast=False,
-            )
-        except Exception:
-            # Some environments have fast-tokenizer parsing incompatibilities
-            # (e.g., tokenizer.json ModelWrapper errors). Fall back to slow.
-            try:
-                tokenizer = AutoTokenizer.from_pretrained(
-                    source["local_path"],
-                    use_fast=False,
-                )
-            except Exception as slow_error:
-                raise RuntimeError(
-                    "Failed to load tokenizer from local files. "
-                    "This commonly happens with older tokenizer stacks. "
-                    f"Installed transformers={transformers.__version__}. "
-                    "Please use transformers>=4.39.0 (and a recent tokenizers build), "
-                    "or re-download model tokenizer files."
-                ) from slow_error
+        tokenizer = _try_tokenizer_strategies(
+            source["local_path"],
+            trust_remote_code=False,
+            strategies=[
+                {},                     # fast (default)
+                {"use_fast": False},    # slow fallback
+            ],
+        )
     else:
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                source["hf_name"],
-                trust_remote_code=trust_remote_code,
-                local_files_only=True,
-            )
-        except OSError:
-            # Not cached locally — try online with fast tokenizer, then
-            # fall back to slow if the fast tokenizer has parse issues.
-            try:
-                tokenizer = AutoTokenizer.from_pretrained(
-                    source["hf_name"],
-                    trust_remote_code=trust_remote_code,
-                    local_files_only=False,
-                )
-            except OSError:
-                raise
-            except Exception:
-                tokenizer = AutoTokenizer.from_pretrained(
-                    source["hf_name"],
-                    trust_remote_code=trust_remote_code,
-                    local_files_only=False,
-                    use_fast=False,
-                )
-        except Exception:
-            # Fast tokenizer parse failure from local cache — retry with
-            # slow tokenizer, first local then online.
-            try:
-                tokenizer = AutoTokenizer.from_pretrained(
-                    source["hf_name"],
-                    trust_remote_code=trust_remote_code,
-                    local_files_only=True,
-                    use_fast=False,
-                )
-            except OSError:
-                tokenizer = AutoTokenizer.from_pretrained(
-                    source["hf_name"],
-                    trust_remote_code=trust_remote_code,
-                    local_files_only=False,
-                    use_fast=False,
-                )
+        tokenizer = _try_tokenizer_strategies(
+            source["hf_name"],
+            trust_remote_code=trust_remote_code,
+            strategies=[
+                {"local_files_only": True},                         # local fast
+                {"local_files_only": True, "use_fast": False},      # local slow
+                {"local_files_only": False},                        # online fast
+                {"local_files_only": False, "use_fast": False},     # online slow
+            ],
+        )
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

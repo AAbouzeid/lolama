@@ -23,12 +23,15 @@ def _load_state_dict_compat(model: nn.Module, state_dict: dict[str, torch.Tensor
     """Load a state dict across PyTorch versions.
 
     Newer PyTorch supports assign=True for lower-overhead loads; older versions
-    don't. Try assign first, then fall back.
+    don't. Try assign first, then fall back only if assign is the unsupported arg.
     """
     try:
         model.load_state_dict(state_dict, assign=True)
-    except TypeError:
-        model.load_state_dict(state_dict)
+    except TypeError as e:
+        if "assign" in str(e):
+            model.load_state_dict(state_dict)
+        else:
+            raise
 
 
 class QuantizedLinear(nn.Module):
@@ -634,6 +637,9 @@ def load_quantized_model(
     When device != "cpu", loads tensors directly to the target device and
     uses assign=True to avoid redundant CPU allocation.
 
+    On CPU, automatically pre-dequantizes and caches weights to avoid
+    repeated per-forward dequantization overhead.
+
     Note: The model architecture must already have QuantizedLinear layers.
     Call apply_quantization_structure() first to set up the module tree.
 
@@ -671,6 +677,11 @@ def load_quantized_model(
         logger.info(f"Loaded quantized model from {model_dir}/ (legacy .pt)")
     else:
         raise ValueError(f"No model.safetensors or model.pt found in {model_dir}")
+
+    # On CPU the naive dequant path allocates a full weight tensor every
+    # forward call.  Pre-cache dequantized weights to avoid this overhead.
+    if device == "cpu":
+        dequantize_model_for_inference(model, dtype=torch.float32)
 
     return model
 

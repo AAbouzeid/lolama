@@ -38,16 +38,30 @@ class RMSNorm(nn.Module):
 
 
 # Module-level causal mask cache, keyed by device to avoid cross-device bugs.
-# Each entry grows monotonically as larger sequences are seen.
+# Capped at _MAX_CACHED_SIZE to prevent unbounded VRAM growth on servers
+# handling variable-length sequences.
+_MAX_CACHED_MASK_SIZE: int = 8192
 _causal_mask_cache: dict[torch.device, torch.Tensor] = {}
 
 
 def _get_causal_mask(size: int, device: torch.device) -> torch.Tensor:
-    """Return a lower-triangular bool mask of at least ``size``, cached per device."""
+    """Return a lower-triangular bool mask of at least ``size``, cached per device.
+
+    For sizes > _MAX_CACHED_MASK_SIZE, returns an uncached tensor to
+    avoid holding large allocations permanently.
+    """
+    if size > _MAX_CACHED_MASK_SIZE:
+        return torch.tril(torch.ones(size, size, device=device, dtype=torch.bool))
+
     cached = _causal_mask_cache.get(device)
     if cached is None or cached.shape[0] < size:
+        # Round up to nearest power-of-2 to reduce re-allocations
+        alloc_size = 1
+        while alloc_size < size:
+            alloc_size <<= 1
+        alloc_size = min(alloc_size, _MAX_CACHED_MASK_SIZE)
         _causal_mask_cache[device] = torch.tril(
-            torch.ones(size, size, device=device, dtype=torch.bool)
+            torch.ones(alloc_size, alloc_size, device=device, dtype=torch.bool)
         )
     return _causal_mask_cache[device]
 

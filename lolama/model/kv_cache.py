@@ -92,4 +92,4 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     head_dim: int
     batch, num_kv_heads, seq_len, head_dim = x.shape
     x = x.unsqueeze(2).expand(batch, num_kv_heads, n_rep, seq_len, head_dim)
-    return x.reshape(batch, num_kv_heads * n_rep, seq_len, head_dim)
+    return x.contiguous().view(batch, num_kv_heads * n_rep, seq_len, head_dim)

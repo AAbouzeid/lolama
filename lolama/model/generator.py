@@ -12,6 +12,24 @@ from .sampler import Sampler
 from ..protocols import GenerativeModel
 
 
+def _create_kv_caches_safe(
+    model: GenerativeModel,
+    batch_size: int,
+    max_seq_len: int,
+) -> list[KVCache]:
+    """Create KV caches with an actionable error on OOM."""
+    try:
+        return model.create_kv_caches(batch_size=batch_size, max_seq_len=max_seq_len)
+    except (RuntimeError, torch.OutOfMemoryError) as e:
+        if "out of memory" in str(e).lower() or isinstance(e, torch.OutOfMemoryError):
+            raise RuntimeError(
+                f"Out of memory allocating KV cache "
+                f"(batch_size={batch_size}, max_seq_len={max_seq_len}). "
+                f"Try reducing --max-tokens, using --quantize, or a smaller model."
+            ) from e
+        raise
+
+
 class TextGenerator:
     """Handles text generation using any model that implements GenerativeModel.
     
@@ -131,7 +149,7 @@ class TextGenerator:
         current_len: int = prompt_len
 
         # Create pre-allocated KV cache
-        kv_caches: list[KVCache] = self.model.create_kv_caches(
+        kv_caches: list[KVCache] = _create_kv_caches_safe(self.model,
             batch_size=batch_size,
             max_seq_len=max_len,
         )
@@ -258,7 +276,7 @@ class TextGenerator:
         current_len: int = prompt_len
 
         # Create pre-allocated KV cache
-        kv_caches: list[KVCache] = self.model.create_kv_caches(
+        kv_caches: list[KVCache] = _create_kv_caches_safe(self.model,
             batch_size=batch_size,
             max_seq_len=max_len,
         )
@@ -292,14 +310,15 @@ class TextGenerator:
             if config.eos_token_id is not None and token_id == config.eos_token_id:
                 break
 
-            # Queue next forward pass BEFORE yielding.
-            # On MPS this keeps the GPU busy while we sync for the yield.
-            # Skip on last iteration (its logits would be unused).
+            # Yield before dispatching next forward pass so generator
+            # cancellation (close/throw) doesn't leave KV cache in an
+            # inconsistent state from an already-issued forward pass.
+            yield token_id
+
+            # Skip forward pass on last iteration (its logits would be unused)
             if i < config.max_new_tokens - 1:
                 decode_mask: torch.Tensor | None = all_mask[:, :current_len] if all_mask is not None else None
                 logits = self.model(next_token, kv_caches=kv_caches, attention_mask=decode_mask)
-
-            yield token_id
     
     @torch.inference_mode()
     def generate_batch(
@@ -360,14 +379,18 @@ class TextGenerator:
         all_mask: torch.Tensor = torch.zeros(
             batch_size, max_total_len, dtype=torch.long, device=device,
         )
-        all_mask[:, :max_prompt_len] = (all_ids[:, :max_prompt_len] != config.pad_token_id).long()
+        # Build mask from actual prompt lengths (not pad_token_id comparison,
+        # which would break if a real token ID equals pad_token_id)
+        for b_idx, p_len in enumerate(prompt_lengths):
+            pad_len: int = max_prompt_len - p_len
+            all_mask[b_idx, pad_len:max_prompt_len] = 1
         current_len: int = max_prompt_len
 
         # Track which sequences have finished
         finished: torch.Tensor = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
         # Create KV caches
-        kv_caches: list[KVCache] = self.model.create_kv_caches(
+        kv_caches: list[KVCache] = _create_kv_caches_safe(self.model,
             batch_size=batch_size,
             max_seq_len=max_total_len,
         )
@@ -401,9 +424,19 @@ class TextGenerator:
             # Sample next token
             next_token: torch.Tensor = sampler.sample(next_logits)
 
+            # For finished sequences, substitute pad token so they don't
+            # pollute the KV cache with garbage continuation tokens
+            if finished.any():
+                next_token = torch.where(
+                    finished.unsqueeze(-1),
+                    torch.full_like(next_token, config.pad_token_id),
+                    next_token,
+                )
+
             # Store in pre-allocated buffers (no allocation)
             all_ids[:, current_len] = next_token.squeeze(-1)
-            all_mask[:, current_len] = 1
+            # Only mark unfinished sequences as attended
+            all_mask[:, current_len] = (~finished).long()
             current_len += 1
 
             # Store generated tokens (only for unfinished sequences)

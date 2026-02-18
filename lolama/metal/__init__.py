@@ -17,8 +17,19 @@ _ext = None
 _available: bool | None = None
 
 
+def _source_hash(path: str) -> str:
+    """Short hash of a source file for cache invalidation."""
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()[:8]
+
+
 def _load_extension():
-    """JIT-compile the Metal extension. Returns the module or None on failure."""
+    """JIT-compile the Metal extension. Returns the module or None on failure.
+
+    The extension name includes a hash of the source file so that edits
+    to metal_ext.cpp automatically invalidate the torch JIT cache.
+    """
     global _ext
     if _ext is not None:
         return _ext
@@ -29,8 +40,12 @@ def _load_extension():
         ext_dir = os.path.dirname(os.path.abspath(__file__))
         source = os.path.join(ext_dir, "metal_ext.cpp")
 
+        # Include source hash in name so edits bust the JIT cache
+        src_hash = _source_hash(source)
+        ext_name = f"lolama_metal_ext_{src_hash}"
+
         _ext = load(
-            name="lolama_metal_ext",
+            name=ext_name,
             sources=[source],
             extra_cflags=["-ObjC++", "-std=c++17", "-O2"],
             extra_ldflags=["-framework", "Metal", "-framework", "Foundation"],
