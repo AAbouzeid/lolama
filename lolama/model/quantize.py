@@ -19,6 +19,18 @@ from ..utils.logging import get_model_logger
 logger = get_model_logger()
 
 
+def _load_state_dict_compat(model: nn.Module, state_dict: dict[str, torch.Tensor]) -> None:
+    """Load a state dict across PyTorch versions.
+
+    Newer PyTorch supports assign=True for lower-overhead loads; older versions
+    don't. Try assign first, then fall back.
+    """
+    try:
+        model.load_state_dict(state_dict, assign=True)
+    except TypeError:
+        model.load_state_dict(state_dict)
+
+
 class QuantizedLinear(nn.Module):
     """Linear layer with int8 quantized weights.
 
@@ -226,9 +238,13 @@ class QuantizedLinear(nn.Module):
         return out
 
     def _forward_naive(self, x: torch.Tensor) -> torch.Tensor:
-        """Naive dequant to fp16 + F.linear (CPU / fallback)."""
-        weight_f32: torch.Tensor = self.weight_int8.float() * self.weight_scale.float().unsqueeze(1)
-        weight: torch.Tensor = weight_f32.to(x.dtype)
+        """Dequant to input dtype + F.linear (CPU / fallback).
+
+        Performs dequantization directly in the input's dtype to avoid
+        materializing a full fp32 weight matrix (saves ~N*K*2 bytes per call).
+        """
+        dtype: torch.dtype = x.dtype
+        weight: torch.Tensor = self.weight_int8.to(dtype) * self.weight_scale.to(dtype).unsqueeze(1)
         return F.linear(x, weight)
 
     def _forward_metal(self, x: torch.Tensor) -> torch.Tensor:
@@ -262,8 +278,8 @@ class QuantizedLinear(nn.Module):
 
     def _forward_mixed(self, x: torch.Tensor, backend: str) -> torch.Tensor:
         """Mixed-precision path: int8 for normal columns, fp16 for outlier columns."""
-        x_normal: torch.Tensor = x[..., self.normal_indices.long()]
-        x_outlier: torch.Tensor = x[..., self.outlier_indices.long()]
+        x_normal: torch.Tensor = x[..., self.normal_indices.long()].contiguous()
+        x_outlier: torch.Tensor = x[..., self.outlier_indices.long()].contiguous()
 
         # int8 matmul on normal columns (existing kernel, unchanged)
         if backend == "metal":
@@ -317,7 +333,9 @@ class QuantizedLinear(nn.Module):
     def _apply(self, fn, recurse=True):
         """Clear cached weights when the module is moved (e.g., .to(device), .half())."""
         self.clear_cache()
-        return super()._apply(fn, recurse=recurse)
+        # PyTorch's Module._apply signature differs across versions; call the
+        # base implementation without passing recurse for broad compatibility.
+        return super()._apply(fn)
     
     def extra_repr(self) -> str:
         s = f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}, quantized=int8'
@@ -638,7 +656,7 @@ def load_quantized_model(
 
         state_dict: dict = load_file(str(safetensors_path), device=device)
         _register_outlier_buffers_from_state_dict(model, state_dict)
-        model.load_state_dict(state_dict, assign=True)
+        _load_state_dict_compat(model, state_dict)
         logger.info(f"Loaded quantized model from {model_dir}/")
     elif legacy_path.exists():
         logger.warning(
@@ -649,7 +667,7 @@ def load_quantized_model(
         if not checkpoint.get('quantized', False):
             raise ValueError(f"{legacy_path} is not a quantized model checkpoint")
         _register_outlier_buffers_from_state_dict(model, checkpoint['state_dict'])
-        model.load_state_dict(checkpoint['state_dict'], assign=True)
+        _load_state_dict_compat(model, checkpoint['state_dict'])
         logger.info(f"Loaded quantized model from {model_dir}/ (legacy .pt)")
     else:
         raise ValueError(f"No model.safetensors or model.pt found in {model_dir}")

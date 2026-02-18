@@ -54,6 +54,7 @@ class TextGenerator:
         input_ids: torch.Tensor,
         config: GenerationConfig | None = None,
         pixel_values: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Autoregressive text generation with pre-allocated KV cache.
@@ -63,6 +64,10 @@ class TextGenerator:
             config: Generation configuration (preferred)
             pixel_values: Optional (B, 3, H, W) image tensor for VLMs.
                          Only used on first forward pass (cached internally after).
+            attention_mask: Optional (B, L) mask with 1=attend, 0=padding.
+                          Propagated through prefill and decode steps so padded
+                          positions are never attended to. Cannot be combined
+                          with pixel_values.
             **kwargs: Individual parameters (for backwards compatibility):
                 max_new_tokens, temperature, top_k, top_p, do_sample,
                 eos_token_id, repetition_penalty
@@ -101,6 +106,22 @@ class TextGenerator:
                 f"exceeds model max_seq_len ({max_seq_len})"
             )
 
+        # Validate: attention_mask with pixel_values is unsupported
+        if attention_mask is not None and pixel_values is not None:
+            raise ValueError(
+                "attention_mask is not supported with pixel_values. "
+                "The model handles masking internally for VLM inputs."
+            )
+
+        # Track attention mask when provided (None preserves the is_causal fast path)
+        if attention_mask is not None:
+            all_mask: torch.Tensor | None = torch.zeros(
+                batch_size, max_len, dtype=torch.long, device=input_ids.device,
+            )
+            all_mask[:, :prompt_len] = attention_mask
+        else:
+            all_mask = None
+
         # Track which sequences have finished (hit eos)
         finished: torch.Tensor = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
 
@@ -124,11 +145,12 @@ class TextGenerator:
         )
 
         # First forward pass - include pixel_values for VLMs
+        prefill_mask: torch.Tensor | None = all_mask[:, :prompt_len] if all_mask is not None else None
         logits: torch.Tensor
         if pixel_values is not None:
             logits = self.model(input_ids, pixel_values=pixel_values, kv_caches=kv_caches)
         else:
-            logits = self.model(input_ids, kv_caches=kv_caches)
+            logits = self.model(input_ids, kv_caches=kv_caches, attention_mask=prefill_mask)
 
         for i in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
@@ -141,6 +163,8 @@ class TextGenerator:
 
             # Store in pre-allocated buffer (no allocation)
             all_ids[:, current_len] = next_token.squeeze(-1)
+            if all_mask is not None:
+                all_mask[:, current_len] = 1
             current_len += 1
 
             # Check for EOS token
@@ -151,7 +175,8 @@ class TextGenerator:
 
             # Skip forward pass on last iteration (its logits would be unused)
             if i < config.max_new_tokens - 1:
-                logits = self.model(next_token, kv_caches=kv_caches)
+                decode_mask: torch.Tensor | None = all_mask[:, :current_len] if all_mask is not None else None
+                logits = self.model(next_token, kv_caches=kv_caches, attention_mask=decode_mask)
 
         return all_ids[:, :current_len]
     
@@ -161,6 +186,7 @@ class TextGenerator:
         input_ids: torch.Tensor,
         config: GenerationConfig | None = None,
         pixel_values: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> Iterator[int]:
         """Streaming text generation - yields tokens as they're generated.
@@ -170,6 +196,10 @@ class TextGenerator:
             config: Generation configuration (preferred)
             pixel_values: Optional (B, 3, H, W) image tensor for VLMs.
                          Only used on first forward pass (cached internally after).
+            attention_mask: Optional (B, L) mask with 1=attend, 0=padding.
+                          Propagated through prefill and decode steps so padded
+                          positions are never attended to. Cannot be combined
+                          with pixel_values.
             **kwargs: Individual parameters (for backwards compatibility)
 
         Yields:
@@ -198,6 +228,22 @@ class TextGenerator:
         if batch_size != 1:
             raise ValueError("Streaming only supports batch_size=1")
 
+        # Validate: attention_mask with pixel_values is unsupported
+        if attention_mask is not None and pixel_values is not None:
+            raise ValueError(
+                "attention_mask is not supported with pixel_values. "
+                "The model handles masking internally for VLM inputs."
+            )
+
+        # Track attention mask when provided (None preserves the is_causal fast path)
+        if attention_mask is not None:
+            all_mask: torch.Tensor | None = torch.zeros(
+                batch_size, max_len, dtype=torch.long, device=input_ids.device,
+            )
+            all_mask[:, :prompt_len] = attention_mask
+        else:
+            all_mask = None
+
         # Create sampler
         sampler: Sampler = Sampler(
             temperature=config.temperature,
@@ -218,11 +264,12 @@ class TextGenerator:
         )
 
         # Initial forward pass (populates cache) - include pixel_values for VLMs
+        prefill_mask: torch.Tensor | None = all_mask[:, :prompt_len] if all_mask is not None else None
         logits: torch.Tensor
         if pixel_values is not None:
             logits = self.model(input_ids, pixel_values=pixel_values, kv_caches=kv_caches)
         else:
-            logits = self.model(input_ids, kv_caches=kv_caches)
+            logits = self.model(input_ids, kv_caches=kv_caches, attention_mask=prefill_mask)
 
         for i in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
@@ -235,6 +282,8 @@ class TextGenerator:
 
             # Store in pre-allocated buffer (no allocation)
             all_ids[:, current_len] = next_token.squeeze(-1)
+            if all_mask is not None:
+                all_mask[:, current_len] = 1
             current_len += 1
 
             # Extract token value
@@ -247,7 +296,8 @@ class TextGenerator:
             # On MPS this keeps the GPU busy while we sync for the yield.
             # Skip on last iteration (its logits would be unused).
             if i < config.max_new_tokens - 1:
-                logits = self.model(next_token, kv_caches=kv_caches)
+                decode_mask: torch.Tensor | None = all_mask[:, :current_len] if all_mask is not None else None
+                logits = self.model(next_token, kv_caches=kv_caches, attention_mask=decode_mask)
 
             yield token_id
     
