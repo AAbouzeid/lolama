@@ -243,6 +243,15 @@ class LLaVA(nn.Module):
                 torch.mps.empty_cache()
             logger.debug("Vision tower offloaded to CPU")
 
+            # Expand attention_mask to match merged sequence length.
+            # The single <image> token is replaced by num_image_tokens patch
+            # embeddings, so the mask must grow by (num_image_tokens - 1).
+            if attention_mask is not None:
+                num_image_tokens = image_features.shape[1]
+                attention_mask = self._expand_mask_for_images(
+                    attention_mask, input_ids, num_image_tokens,
+                )
+
             # Forward through LLM
             logger.debug("Running LLM forward pass (prefill)...")
             return self.language_model(
@@ -257,6 +266,51 @@ class LLaVA(nn.Module):
                 kv_caches=kv_caches,
                 attention_mask=attention_mask,
             )
+
+    def _expand_mask_for_images(
+        self,
+        attention_mask: torch.Tensor,
+        input_ids: torch.Tensor,
+        num_image_tokens: int,
+    ) -> torch.Tensor:
+        """Expand attention_mask to account for image-token replacement.
+
+        Each <image> token (1 position) is replaced by ``num_image_tokens``
+        patch embeddings.  The mask value at the <image> position is
+        replicated across all patch positions so padding semantics are
+        preserved.
+
+        Args:
+            attention_mask: (B, L) original mask (1=attend, 0=pad).
+            input_ids: (B, L) token IDs used to locate <image> tokens.
+            num_image_tokens: Number of patch embeddings per image.
+
+        Returns:
+            (B, L - 1 + num_image_tokens) expanded mask.
+        """
+        batch_size, seq_len = input_ids.shape
+        image_token_id = self._vlm_config.image_token_id
+        new_seq_len = seq_len - 1 + num_image_tokens
+        expanded = attention_mask.new_zeros(batch_size, new_seq_len)
+
+        for i in range(batch_size):
+            img_pos = int((input_ids[i] == image_token_id).nonzero(as_tuple=True)[0][0].item())
+
+            # Copy mask before image
+            if img_pos > 0:
+                expanded[i, :img_pos] = attention_mask[i, :img_pos]
+
+            # Replicate <image> mask value across all patch positions
+            expanded[i, img_pos:img_pos + num_image_tokens] = attention_mask[i, img_pos]
+
+            # Copy mask after image
+            text_after = img_pos + 1
+            merged_pos = img_pos + num_image_tokens
+            remaining = seq_len - text_after
+            if remaining > 0:
+                expanded[i, merged_pos:merged_pos + remaining] = attention_mask[i, text_after:]
+
+        return expanded
 
     def reset_image_cache(self) -> None:
         """Reset image cache flag and restore vision tower for new generation."""

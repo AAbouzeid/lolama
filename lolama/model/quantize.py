@@ -313,6 +313,11 @@ class QuantizedLinear(nn.Module):
         """Clear cached dequantized weights to save memory."""
         if hasattr(self, '_cached_weight'):
             self._cached_weight = None
+
+    def _apply(self, fn, recurse=True):
+        """Clear cached weights when the module is moved (e.g., .to(device), .half())."""
+        self.clear_cache()
+        return super()._apply(fn, recurse=recurse)
     
     def extra_repr(self) -> str:
         s = f'in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}, quantized=int8'
@@ -466,6 +471,7 @@ def save_quantized_model(
     model: nn.Module,
     output_dir: str,
     source_dir: str | None = None,
+    outlier_threshold: float = 0.0,
 ) -> None:
     """Save a quantized model to a directory.
 
@@ -478,6 +484,7 @@ def save_quantized_model(
         model: The quantized model
         output_dir: Directory to save to (e.g., 'weights/tinyllama-1.1b-int8')
         source_dir: Original model directory to copy tokenizer/config from
+        outlier_threshold: The threshold used for outlier detection (persisted in config)
     """
     import json
     import shutil
@@ -528,6 +535,7 @@ def save_quantized_model(
         'skip_layers': skip_layers,
         'outlier_detection': len(outlier_layers) > 0,
         'outlier_layers': len(outlier_layers),
+        'outlier_threshold': outlier_threshold,
     }
     quant_config_path: Path = output_path / "quantization_config.json"
     with open(quant_config_path, 'w') as f:
@@ -633,6 +641,10 @@ def load_quantized_model(
         model.load_state_dict(state_dict, assign=True)
         logger.info(f"Loaded quantized model from {model_dir}/")
     elif legacy_path.exists():
+        logger.warning(
+            "Loading legacy .pt checkpoint with pickle (weights_only=False). "
+            "Only load .pt files you trust. Prefer model.safetensors format."
+        )
         checkpoint: dict = torch.load(legacy_path, map_location=device, weights_only=False)
         if not checkpoint.get('quantized', False):
             raise ValueError(f"{legacy_path} is not a quantized model checkpoint")

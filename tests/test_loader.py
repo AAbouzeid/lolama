@@ -67,6 +67,43 @@ def test_load_tokenizer_local_valueerror_does_not_mutate_config(monkeypatch, tmp
     assert calls[1].get("use_fast") is False
 
 
+def test_load_tokenizer_remote_fast_online_parse_falls_back_to_slow(monkeypatch):
+    """Regression: OSError -> online-fast parse failure -> online-slow."""
+    monkeypatch.setattr(
+        loader,
+        "resolve_model_source",
+        lambda _: {"local_path": None, "hf_name": "dummy/model", "trust_remote_code": False},
+    )
+
+    calls: list[dict] = []
+
+    def _fake_from_pretrained(path, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            # local-fast: not cached
+            raise OSError("not in local cache")
+        if len(calls) == 2:
+            # online-fast: parse failure (not OSError)
+            raise RuntimeError("fast tokenizer JSON parse error")
+        # online-slow: succeeds
+        return _DummyTokenizer()
+
+    monkeypatch.setattr(loader.AutoTokenizer, "from_pretrained", _fake_from_pretrained)
+
+    tok = loader.load_tokenizer("dummy/model")
+
+    assert tok.pad_token == tok.eos_token
+    # Call 1: local-fast (OSError)
+    assert calls[0]["local_files_only"] is True
+    assert calls[0].get("use_fast") is None
+    # Call 2: online-fast (RuntimeError)
+    assert calls[1]["local_files_only"] is False
+    assert calls[1].get("use_fast") is None
+    # Call 3: online-slow (success)
+    assert calls[2]["local_files_only"] is False
+    assert calls[2]["use_fast"] is False
+
+
 def test_load_tokenizer_remote_slow_retry_allows_online(monkeypatch):
     monkeypatch.setattr(
         loader,

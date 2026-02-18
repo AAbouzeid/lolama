@@ -10,12 +10,9 @@ import transformers
 
 from ..model import Llama, LlamaConfig
 from ..utils.logging import get_data_logger
-from .registry import MODEL_REGISTRY
+from .registry import MODEL_REGISTRY, WEIGHTS_DIR
 
 logger = get_data_logger()
-
-PROJECT_ROOT = Path(__file__).parent.parent.parent
-WEIGHTS_DIR = PROJECT_ROOT / "weights"
 
 
 def resolve_model_source(model_name_or_path: str) -> dict[str, str | Path | bool | None]:
@@ -123,13 +120,26 @@ def load_tokenizer(
                 local_files_only=True,
             )
         except OSError:
-            tokenizer = AutoTokenizer.from_pretrained(
-                source["hf_name"],
-                trust_remote_code=trust_remote_code,
-                local_files_only=False,
-            )
+            # Not cached locally — try online with fast tokenizer, then
+            # fall back to slow if the fast tokenizer has parse issues.
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    source["hf_name"],
+                    trust_remote_code=trust_remote_code,
+                    local_files_only=False,
+                )
+            except OSError:
+                raise
+            except Exception:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    source["hf_name"],
+                    trust_remote_code=trust_remote_code,
+                    local_files_only=False,
+                    use_fast=False,
+                )
         except Exception:
-            # Retry with slow tokenizer first from local cache, then online.
+            # Fast tokenizer parse failure from local cache — retry with
+            # slow tokenizer, first local then online.
             try:
                 tokenizer = AutoTokenizer.from_pretrained(
                     source["hf_name"],
@@ -161,12 +171,30 @@ def _load_hf_state_dict(
     local_files_only: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Load an HF-keyed state dict, preferring direct safetensors over model instantiation."""
+    import json
     path = Path(hf_model_path)
+
+    # Single-file safetensors
     safetensors_file = path / "model.safetensors"
     if safetensors_file.exists():
         from safetensors.torch import load_file
         logger.info(f"Loading weights from {safetensors_file} (direct)")
         return load_file(str(safetensors_file))
+
+    # Sharded safetensors (multiple files + index)
+    index_file = path / "model.safetensors.index.json"
+    if index_file.exists():
+        from safetensors.torch import load_file
+        with open(index_file) as f:
+            weight_map: dict[str, str] = json.load(f)["weight_map"]
+        # Collect unique shard filenames
+        shard_files: set[str] = set(weight_map.values())
+        logger.info(f"Loading weights from {len(shard_files)} safetensors shards (direct)")
+        state_dict: dict[str, torch.Tensor] = {}
+        for fname in sorted(shard_files):
+            shard_path = (path / fname).resolve()
+            state_dict.update(load_file(str(shard_path)))
+        return state_dict
 
     # Fallback: instantiate HF model to extract state dict
     logger.info(f"Loading weights from {hf_model_path} (via HF model)...")
@@ -208,26 +236,8 @@ def load_weights_from_hf(
     )
 
     # Build mapping (HF key -> Our key)
-    mapping: dict[str, str] = {}
-    mapping['model.embed_tokens.weight'] = 'embed_tokens.weight'
-
-    num_layers = our_model.config.num_layers
-    for i in range(num_layers):
-        prefix_hf = f'model.layers.{i}'
-        prefix_our = f'layers.{i}'
-
-        mapping[f'{prefix_hf}.self_attn.q_proj.weight'] = f'{prefix_our}.attention.q_proj.weight'
-        mapping[f'{prefix_hf}.self_attn.k_proj.weight'] = f'{prefix_our}.attention.k_proj.weight'
-        mapping[f'{prefix_hf}.self_attn.v_proj.weight'] = f'{prefix_our}.attention.v_proj.weight'
-        mapping[f'{prefix_hf}.self_attn.o_proj.weight'] = f'{prefix_our}.attention.o_proj.weight'
-        mapping[f'{prefix_hf}.mlp.gate_proj.weight'] = f'{prefix_our}.feed_forward.w_gate.weight'
-        mapping[f'{prefix_hf}.mlp.up_proj.weight'] = f'{prefix_our}.feed_forward.w_up.weight'
-        mapping[f'{prefix_hf}.mlp.down_proj.weight'] = f'{prefix_our}.feed_forward.w_down.weight'
-        mapping[f'{prefix_hf}.input_layernorm.weight'] = f'{prefix_our}.attention_norm.weight'
-        mapping[f'{prefix_hf}.post_attention_layernorm.weight'] = f'{prefix_our}.ffn_norm.weight'
-
-    mapping['model.norm.weight'] = 'norm.weight'
-    mapping['lm_head.weight'] = 'lm_head.weight'
+    from .weight_mappings import build_llm_weight_mapping_with_lm_head
+    mapping: dict[str, str] = build_llm_weight_mapping_with_lm_head(our_model.config.num_layers)
 
     # Get current state dict for shape comparison
     our_state = our_model.state_dict()

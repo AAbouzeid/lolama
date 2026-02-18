@@ -81,6 +81,30 @@ class TestLLaVA:
         expected_seq_len = input_ids.shape[1] - 1 + num_patches
         assert logits.shape == (batch_size, expected_seq_len, tiny_vlm_config.llm_config.vocab_size)
 
+    def test_forward_with_image_and_attention_mask(self, tiny_llava, tiny_vlm_config):
+        """Regression: attention_mask must be expanded after image-token merge."""
+        batch_size = 1
+        image_token_id = tiny_vlm_config.image_token_id
+
+        input_ids = torch.tensor([[1, 2, image_token_id, 5, 6]])
+        attention_mask = torch.ones_like(input_ids)
+        pixel_values = torch.randn(
+            batch_size, 3,
+            tiny_vlm_config.vision_config.image_size,
+            tiny_vlm_config.vision_config.image_size,
+        )
+
+        # This used to raise RuntimeError due to mask/embedding shape mismatch
+        logits = tiny_llava(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            attention_mask=attention_mask,
+        )
+
+        num_patches = tiny_vlm_config.vision_config.num_patches
+        expected_seq_len = input_ids.shape[1] - 1 + num_patches
+        assert logits.shape == (batch_size, expected_seq_len, tiny_vlm_config.llm_config.vocab_size)
+
     def test_forward_no_image_token(self, tiny_llava, tiny_vlm_config):
         """Test forward with no image token in text - uses text only path."""
         batch_size = 1
