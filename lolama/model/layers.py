@@ -40,6 +40,10 @@ class RMSNorm(nn.Module):
 class LlamaAttention(nn.Module):
     """Multi-head attention with RoPE, GQA, and Flash Attention."""
     
+    # Class-level causal mask cache: shared across all layers to avoid
+    # per-layer per-call allocation during prefill with padding masks.
+    _causal_cache: torch.Tensor | None = None
+
     def __init__(self, config: LlamaConfig):
         super().__init__()
         self.num_heads: int = config.num_heads
@@ -47,7 +51,7 @@ class LlamaAttention(nn.Module):
         self.head_dim: int = config.d_model // config.num_heads
         self.d_model: int = config.d_model
         self.n_rep: int = self.num_heads // self.num_kv_heads
-        
+
         # Q projection: full size
         self.q_proj: nn.Linear = nn.Linear(config.d_model, config.d_model, bias=False)
         
@@ -108,10 +112,11 @@ class LlamaAttention(nn.Module):
             combined_mask: torch.Tensor
             if L > 1:
                 # Prefill: need causal + padding mask
-                # Create causal mask where position i can attend to j where j <= i
-                # Use offset to account for where we are in the sequence
-                causal_mask: torch.Tensor = torch.ones(L, S, device=x.device, dtype=torch.bool)
-                causal_mask = torch.tril(causal_mask, diagonal=S - L)
+                # Use a cached causal mask to avoid allocating per layer per call.
+                cls = LlamaAttention
+                if cls._causal_cache is None or cls._causal_cache.shape[0] < S or cls._causal_cache.device != x.device:
+                    cls._causal_cache = torch.tril(torch.ones(S, S, device=x.device, dtype=torch.bool))
+                causal_mask: torch.Tensor = cls._causal_cache[S - L:S, :S]
                 combined_mask = causal_mask.unsqueeze(0) & padding_mask
             else:
                 # Generation (L=1): new token can attend to all non-padding positions

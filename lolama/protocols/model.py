@@ -8,6 +8,7 @@ import torch
 
 if TYPE_CHECKING:
     from ..model.config import LlamaConfig
+    from ..model.vlm_config import VLMConfig
     from ..model.kv_cache import KVCache
 
 
@@ -34,7 +35,7 @@ class GenerativeModel(Protocol):
         generator = TextGenerator(MyCustomModel())
     """
 
-    config: LlamaConfig
+    config: LlamaConfig | VLMConfig
 
     def __call__(
         self,

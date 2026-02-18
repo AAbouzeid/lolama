@@ -4,12 +4,18 @@ Verifies int8 weight quantization roundtrip accuracy, outlier-aware
 mixed-precision, and end-to-end model quantization.
 """
 
+import json
+
 import torch
 import torch.nn as nn
 
 from lolama.model.quantize import (
     QuantizedLinear,
     quantize_model_int8,
+    apply_quantization_structure,
+    save_quantized_model,
+    load_quantized_model,
+    is_quantized_model_dir,
     get_model_size_mb,
 )
 
@@ -155,3 +161,121 @@ class TestQuantizeModel:
         quantize_model_int8(tiny_model, skip_layers=["lm_head", "embed_tokens"])
         assert isinstance(tiny_model.lm_head, nn.Linear)
         assert not isinstance(tiny_model.lm_head, QuantizedLinear)
+
+
+class TestQuantizationRoundTrip:
+    """Save/load round-trip tests for quantized models."""
+
+    def test_save_load_weight_exactness(self, tiny_model, tiny_config, tmp_path):
+        """Dequantized weights should be identical after save/load round-trip."""
+        torch.manual_seed(42)
+        quantize_model_int8(tiny_model, skip_layers=["lm_head", "embed_tokens"])
+
+        # Capture weights before save
+        pre_save_state = {k: v.clone() for k, v in tiny_model.state_dict().items()}
+
+        save_quantized_model(tiny_model, str(tmp_path))
+
+        # Load into a fresh model
+        from lolama.model.llama import Llama
+        model2 = Llama(tiny_config)
+        apply_quantization_structure(model2, skip_layers=["lm_head", "embed_tokens"])
+        load_quantized_model(str(tmp_path), model2)
+
+        # Every tensor in state_dict should match exactly
+        post_load_state = model2.state_dict()
+        assert set(pre_save_state.keys()) == set(post_load_state.keys())
+        for key in pre_save_state:
+            assert torch.equal(pre_save_state[key], post_load_state[key]), (
+                f"Mismatch in {key}: shapes {pre_save_state[key].shape} vs {post_load_state[key].shape}"
+            )
+
+    def test_round_trip_forward_identical(self, tiny_model, tiny_config, tmp_path):
+        """Forward pass after save/load should match pre-save output."""
+        torch.manual_seed(42)
+        ids = torch.randint(0, tiny_config.vocab_size, (1, 8))
+
+        quantize_model_int8(tiny_model, skip_layers=["lm_head", "embed_tokens"])
+        with torch.no_grad():
+            expected = tiny_model(ids)
+
+        save_quantized_model(tiny_model, str(tmp_path))
+
+        from lolama.model.llama import Llama
+        model2 = Llama(tiny_config)
+        apply_quantization_structure(model2, skip_layers=["lm_head", "embed_tokens"])
+        load_quantized_model(str(tmp_path), model2)
+        model2.eval()
+
+        with torch.no_grad():
+            actual = model2(ids)
+
+        assert torch.allclose(expected, actual, atol=1e-6)
+
+    def test_outlier_metadata_preserved(self, tiny_model, tiny_config, tmp_path):
+        """Outlier indices/weights should persist through save/load."""
+        torch.manual_seed(42)
+
+        # Inject outliers into a specific layer to guarantee detection
+        for name, module in tiny_model.named_modules():
+            if isinstance(module, nn.Linear) and "q_proj" in name:
+                module.weight.data[:, 0] *= 100
+                break
+
+        quantize_model_int8(tiny_model, skip_layers=["lm_head", "embed_tokens"],
+                            outlier_threshold=3.0)
+
+        # Verify outliers exist before save
+        has_outliers = any(
+            isinstance(m, QuantizedLinear) and m.outlier_indices is not None
+            for m in tiny_model.modules()
+        )
+        assert has_outliers, "Expected at least one layer with outliers"
+
+        save_quantized_model(tiny_model, str(tmp_path), outlier_threshold=3.0)
+
+        from lolama.model.llama import Llama
+        model2 = Llama(tiny_config)
+        apply_quantization_structure(model2, skip_layers=["lm_head", "embed_tokens"])
+        load_quantized_model(str(tmp_path), model2)
+
+        # Verify outliers survived round-trip
+        has_outliers_after = any(
+            isinstance(m, QuantizedLinear) and m.outlier_indices is not None
+            for m in model2.modules()
+        )
+        assert has_outliers_after, "Outlier metadata lost during save/load"
+
+    def test_config_json_valid(self, tiny_model, tmp_path):
+        """quantization_config.json should contain expected fields."""
+        quantize_model_int8(tiny_model, skip_layers=["lm_head", "embed_tokens"])
+        save_quantized_model(tiny_model, str(tmp_path), outlier_threshold=6.0)
+
+        config_path = tmp_path / "quantization_config.json"
+        assert config_path.exists()
+
+        with open(config_path) as f:
+            config = json.load(f)
+
+        assert config["quantization_method"] == "int8_weight_only"
+        assert config["bits"] == 8
+        assert config["quantized"] is True
+        assert isinstance(config["skip_layers"], list)
+        assert config["outlier_threshold"] == 6.0
+
+    def test_safetensors_format(self, tiny_model, tmp_path):
+        """Saved model should use safetensors format."""
+        quantize_model_int8(tiny_model, skip_layers=["lm_head", "embed_tokens"])
+        save_quantized_model(tiny_model, str(tmp_path))
+
+        assert (tmp_path / "model.safetensors").exists()
+        assert not (tmp_path / "model.pt").exists()
+
+    def test_is_quantized_model_dir(self, tiny_model, tmp_path):
+        """is_quantized_model_dir should return True after save."""
+        assert not is_quantized_model_dir(str(tmp_path))
+
+        quantize_model_int8(tiny_model, skip_layers=["lm_head", "embed_tokens"])
+        save_quantized_model(tiny_model, str(tmp_path))
+
+        assert is_quantized_model_dir(str(tmp_path))

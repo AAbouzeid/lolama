@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -60,8 +61,22 @@ MODEL_REGISTRY: dict[str, dict[str, str | bool]] = {
 }
 
 
+_PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent.parent
+
+
 def _weights_dir() -> Path:
-    return Path(__file__).parent.parent.parent / "weights"
+    """Single source of truth for the weights directory.
+
+    Override with LOLAMA_WEIGHTS_DIR env var.
+    """
+    env = os.environ.get("LOLAMA_WEIGHTS_DIR")
+    if env:
+        return Path(env)
+    return _PROJECT_ROOT / "weights"
+
+
+# Module-level constant for backwards-compatible imports.
+WEIGHTS_DIR: Path = _weights_dir()
 
 
 def _canonical_folder(model_path: str) -> str:

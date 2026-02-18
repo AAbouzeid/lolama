@@ -92,6 +92,15 @@ class TextGenerator:
         prompt_len: int = input_ids.shape[1]
         max_len: int = prompt_len + config.max_new_tokens
 
+        # Validate total length fits within model's context window
+        model_config = self.config
+        max_seq_len: int = getattr(model_config, 'max_seq_len', 0) or getattr(getattr(model_config, 'llm_config', None), 'max_seq_len', 0)
+        if max_seq_len > 0 and max_len > max_seq_len:
+            raise ValueError(
+                f"prompt_len ({prompt_len}) + max_new_tokens ({config.max_new_tokens}) = {max_len} "
+                f"exceeds model max_seq_len ({max_seq_len})"
+            )
+
         # Track which sequences have finished (hit eos)
         finished: torch.Tensor = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
 
@@ -121,7 +130,7 @@ class TextGenerator:
         else:
             logits = self.model(input_ids, kv_caches=kv_caches)
 
-        for _ in range(config.max_new_tokens):
+        for i in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
 
             # Apply repetition penalty over all tokens so far
@@ -140,8 +149,9 @@ class TextGenerator:
                 if finished.all():
                     break
 
-            # Subsequent passes don't need pixel_values (cached in KV)
-            logits = self.model(next_token, kv_caches=kv_caches)
+            # Skip forward pass on last iteration (its logits would be unused)
+            if i < config.max_new_tokens - 1:
+                logits = self.model(next_token, kv_caches=kv_caches)
 
         return all_ids[:, :current_len]
     
@@ -176,6 +186,15 @@ class TextGenerator:
         prompt_len: int = input_ids.shape[1]
         max_len: int = prompt_len + config.max_new_tokens
 
+        # Validate total length fits within model's context window
+        model_config = self.config
+        max_seq_len: int = getattr(model_config, 'max_seq_len', 0) or getattr(getattr(model_config, 'llm_config', None), 'max_seq_len', 0)
+        if max_seq_len > 0 and max_len > max_seq_len:
+            raise ValueError(
+                f"prompt_len ({prompt_len}) + max_new_tokens ({config.max_new_tokens}) = {max_len} "
+                f"exceeds model max_seq_len ({max_seq_len})"
+            )
+
         if batch_size != 1:
             raise ValueError("Streaming only supports batch_size=1")
 
@@ -205,7 +224,7 @@ class TextGenerator:
         else:
             logits = self.model(input_ids, kv_caches=kv_caches)
 
-        for _ in range(config.max_new_tokens):
+        for i in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
 
             # Apply repetition penalty over all tokens so far
@@ -218,15 +237,17 @@ class TextGenerator:
             all_ids[:, current_len] = next_token.squeeze(-1)
             current_len += 1
 
-            # Queue next forward pass BEFORE extracting token value.
-            # On MPS this keeps the GPU busy while we sync for the yield.
-            logits = self.model(next_token, kv_caches=kv_caches)
-
-            # Extract token (forces sync, but next forward is already queued)
+            # Extract token value
             token_id: int = int(next_token.item())
 
             if config.eos_token_id is not None and token_id == config.eos_token_id:
                 break
+
+            # Queue next forward pass BEFORE yielding.
+            # On MPS this keeps the GPU busy while we sync for the yield.
+            # Skip on last iteration (its logits would be unused).
+            if i < config.max_new_tokens - 1:
+                logits = self.model(next_token, kv_caches=kv_caches)
 
             yield token_id
     
@@ -259,6 +280,15 @@ class TextGenerator:
         prompt_lengths: list[int] = [len(p) for p in prompts]
         max_prompt_len: int = max(prompt_lengths)
         max_total_len: int = max_prompt_len + config.max_new_tokens
+
+        # Validate total length fits within model's context window
+        model_config = self.config
+        max_seq_len: int = getattr(model_config, 'max_seq_len', 0) or getattr(getattr(model_config, 'llm_config', None), 'max_seq_len', 0)
+        if max_seq_len > 0 and max_total_len > max_seq_len:
+            raise ValueError(
+                f"max_prompt_len ({max_prompt_len}) + max_new_tokens ({config.max_new_tokens}) = {max_total_len} "
+                f"exceeds model max_seq_len ({max_seq_len})"
+            )
 
         # Pad prompts to same length (left-padding for causal LM)
         padded_prompts: list[torch.Tensor] = []
@@ -309,7 +339,7 @@ class TextGenerator:
         # Generation loop
         generated_tokens: list[list[int]] = [[] for _ in range(batch_size)]
 
-        for _ in range(config.max_new_tokens):
+        for i in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
 
             # Apply repetition penalty (ignore pad token)
@@ -327,9 +357,9 @@ class TextGenerator:
             current_len += 1
 
             # Store generated tokens (only for unfinished sequences)
-            for i in range(batch_size):
-                if not finished[i]:
-                    generated_tokens[i].append(int(next_token[i].item()))
+            for b in range(batch_size):
+                if not finished[b]:
+                    generated_tokens[b].append(int(next_token[b].item()))
 
             # Check for EOS
             if config.eos_token_id is not None:
@@ -337,10 +367,12 @@ class TextGenerator:
                 if finished.all():
                     break
 
-            logits = self.model(
-                next_token, kv_caches=kv_caches,
-                attention_mask=all_mask[:, :current_len],
-            )
+            # Skip forward pass on last iteration (its logits would be unused)
+            if i < config.max_new_tokens - 1:
+                logits = self.model(
+                    next_token, kv_caches=kv_caches,
+                    attention_mask=all_mask[:, :current_len],
+                )
 
         # Return original prompts + generated tokens (without padding)
         results: list[torch.Tensor] = []

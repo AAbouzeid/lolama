@@ -29,6 +29,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from lolama.data import create_model, load_model, load_tokenizer, resolve_model_source, get_quantized_dir
 from lolama.model import (
     quantize_model_int8,
+    apply_quantization_structure,
     dequantize_model_for_inference,
     get_model_size_mb,
     save_quantized_model,
@@ -96,16 +97,14 @@ def generate_response(
 
         print()
     else:
-        with torch.no_grad():
-            output_ids = generator.generate(
-                input_ids,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                repetition_penalty=1.1,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-
+        output_ids = generator.generate(
+            input_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=1.1,
+            eos_token_id=tokenizer.eos_token_id,
+        )
         generated_ids = output_ids[0, input_ids.shape[1]:]
         output_text: str = tokenizer.decode(generated_ids, skip_special_tokens=True)
         print(output_text)
@@ -187,7 +186,7 @@ def batch_generation_demo(generator: TextGenerator, tokenizer, device: str) -> N
 
 def main() -> None:
     # Parse args
-    model_path: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    model_path: str = "tinyllama"
     prompt: str | None = None
     stream: bool = False
     quantize: bool = False
@@ -248,10 +247,8 @@ def main() -> None:
     if quantize and is_quantized_model_dir(str(quantized_dir)):
         print(f"Found saved quantized model: {quantized_dir}/")
         model = create_model(model_path)
-        quantize_model_int8(model, skip_layers=['lm_head', 'embed_tokens'],
-                            outlier_threshold=outlier_threshold)
-        load_quantized_model(str(quantized_dir), model)
-        model = model.to(device)
+        apply_quantization_structure(model, skip_layers=['lm_head', 'embed_tokens'])
+        load_quantized_model(str(quantized_dir), model, device=device)
 
         if fast_mode:
             dequantize_model_for_inference(model)
@@ -266,7 +263,8 @@ def main() -> None:
 
         source_dir: Path | None = get_source_dir(model_path)
         print(f"\nSaving quantized model to {quantized_dir}/")
-        save_quantized_model(model, str(quantized_dir), str(source_dir) if source_dir else None)
+        save_quantized_model(model, str(quantized_dir), str(source_dir) if source_dir else None,
+                             outlier_threshold=outlier_threshold)
 
         if fast_mode:
             dequantize_model_for_inference(model)

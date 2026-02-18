@@ -34,7 +34,7 @@ def _confirm_download(model_path: str) -> None:
         sys.exit(1)
 
     # Check if already downloaded (registry folder or auto-saved folder)
-    weights_dir = Path(__file__).parent.parent / "weights"
+    from .data.registry import WEIGHTS_DIR as weights_dir
     save_dir = weights_dir / info["folder"]
     if save_dir.exists() and any(save_dir.iterdir()):
         return
@@ -141,6 +141,7 @@ def _load_generator(args: argparse.Namespace):
                 save_quantized_model(
                     model.language_model, str(vlm_quantized_dir),
                     str(source_dir) if source_dir else None,
+                    outlier_threshold=args.outlier_threshold,
                 )
                 logger.info(f"Model size after quantization: {get_model_size_mb(model):.1f} MB")
                 logger.info(f"Moving quantized model to {device}...")
@@ -173,12 +174,9 @@ def _load_generator(args: argparse.Namespace):
             logger.info(f"Found saved quantized model: {quantized_dir}/")
             model = create_model(model_path)
             logger.info("Applying int8 quantization structure...")
-            quantize_model_int8(model, skip_layers=["lm_head", "embed_tokens"],
-                               outlier_threshold=args.outlier_threshold)
+            apply_quantization_structure(model, skip_layers=["lm_head", "embed_tokens"])
             logger.info("Loading quantized weights...")
-            load_quantized_model(str(quantized_dir), model)
-            logger.info(f"Moving model to {device}...")
-            model = model.to(device)
+            load_quantized_model(str(quantized_dir), model, device=device)
             logger.info(f"Model size: {get_model_size_mb(model):.1f} MB")
         elif args.quantize:
             model = load_model(model_path, device=device)
@@ -189,7 +187,8 @@ def _load_generator(args: argparse.Namespace):
             source = resolve_model_source(model_path)
             source_dir = source["local_path"]
             logger.info(f"Saving quantized model to {quantized_dir}/")
-            save_quantized_model(model, str(quantized_dir), str(source_dir) if source_dir else None)
+            save_quantized_model(model, str(quantized_dir), str(source_dir) if source_dir else None,
+                                outlier_threshold=args.outlier_threshold)
             logger.info(f"Model size after quantization: {get_model_size_mb(model):.1f} MB")
         else:
             model = load_model(model_path, device=device)
@@ -266,16 +265,15 @@ def _load_generator(args: argparse.Namespace):
             logger.info(f"Generation complete: {token_count} tokens")
             print()
         else:
-            with torch.no_grad():
-                output_ids = generator.generate(
-                    input_ids,
-                    pixel_values=pixel_values,
-                    max_new_tokens=args.max_tokens,
-                    temperature=args.temperature,
-                    top_p=args.top_p,
-                    repetition_penalty=args.repetition_penalty,
-                    eos_token_id=tokenizer.eos_token_id,
-                )
+            output_ids = generator.generate(
+                input_ids,
+                pixel_values=pixel_values,
+                max_new_tokens=args.max_tokens,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                repetition_penalty=args.repetition_penalty,
+                eos_token_id=tokenizer.eos_token_id,
+            )
             generated_ids = output_ids[0, input_ids.shape[1]:]
             print(tokenizer.decode(generated_ids, skip_special_tokens=True))
 

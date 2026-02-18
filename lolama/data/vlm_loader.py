@@ -13,7 +13,8 @@ from ..model import LlamaConfig
 from ..model.vlm_config import VisionConfig, VLMConfig
 from ..model.llava import LLaVA
 from ..utils.logging import get_data_logger
-from .loader import resolve_model_source, WEIGHTS_DIR, WeightLoadingError
+from .loader import resolve_model_source, WeightLoadingError
+from .registry import WEIGHTS_DIR
 
 logger = get_data_logger()
 
@@ -147,22 +148,13 @@ def _build_safetensors_mapping(config: VLMConfig) -> dict[str, str]:
 
     # --- Language model ---
     # Safetensors: language_model.model.* -> Ours: language_model.*
-    mapping["language_model.model.embed_tokens.weight"] = "language_model.embed_tokens.weight"
-
-    for i in range(config.llm_config.num_layers):
-        sf = f"language_model.model.layers.{i}"
-        our = f"language_model.layers.{i}"
-        mapping[f"{sf}.self_attn.q_proj.weight"] = f"{our}.attention.q_proj.weight"
-        mapping[f"{sf}.self_attn.k_proj.weight"] = f"{our}.attention.k_proj.weight"
-        mapping[f"{sf}.self_attn.v_proj.weight"] = f"{our}.attention.v_proj.weight"
-        mapping[f"{sf}.self_attn.o_proj.weight"] = f"{our}.attention.o_proj.weight"
-        mapping[f"{sf}.mlp.gate_proj.weight"] = f"{our}.feed_forward.w_gate.weight"
-        mapping[f"{sf}.mlp.up_proj.weight"] = f"{our}.feed_forward.w_up.weight"
-        mapping[f"{sf}.mlp.down_proj.weight"] = f"{our}.feed_forward.w_down.weight"
-        mapping[f"{sf}.input_layernorm.weight"] = f"{our}.attention_norm.weight"
-        mapping[f"{sf}.post_attention_layernorm.weight"] = f"{our}.ffn_norm.weight"
-
-    mapping["language_model.model.norm.weight"] = "language_model.norm.weight"
+    from .weight_mappings import build_llm_weight_mapping
+    llm_mapping = build_llm_weight_mapping(
+        config.llm_config.num_layers,
+        hf_prefix="language_model.model",
+        our_prefix="language_model",
+    )
+    mapping.update(llm_mapping)
     mapping["language_model.lm_head.weight"] = "language_model.lm_head.weight"
 
     return mapping
@@ -245,30 +237,13 @@ def build_llava_weight_mapping(config: VLMConfig) -> dict[str, str]:
 
     # Language model mappings
     # HF: model.language_model.* -> Ours: language_model.*
-    mapping["model.language_model.embed_tokens.weight"] = "language_model.embed_tokens.weight"
-
-    num_llm_layers = config.llm_config.num_layers
-    for i in range(num_llm_layers):
-        hf_prefix = f"model.language_model.layers.{i}"
-        our_prefix = f"language_model.layers.{i}"
-
-        # Attention
-        mapping[f"{hf_prefix}.self_attn.q_proj.weight"] = f"{our_prefix}.attention.q_proj.weight"
-        mapping[f"{hf_prefix}.self_attn.k_proj.weight"] = f"{our_prefix}.attention.k_proj.weight"
-        mapping[f"{hf_prefix}.self_attn.v_proj.weight"] = f"{our_prefix}.attention.v_proj.weight"
-        mapping[f"{hf_prefix}.self_attn.o_proj.weight"] = f"{our_prefix}.attention.o_proj.weight"
-
-        # FFN
-        mapping[f"{hf_prefix}.mlp.gate_proj.weight"] = f"{our_prefix}.feed_forward.w_gate.weight"
-        mapping[f"{hf_prefix}.mlp.up_proj.weight"] = f"{our_prefix}.feed_forward.w_up.weight"
-        mapping[f"{hf_prefix}.mlp.down_proj.weight"] = f"{our_prefix}.feed_forward.w_down.weight"
-
-        # Norms
-        mapping[f"{hf_prefix}.input_layernorm.weight"] = f"{our_prefix}.attention_norm.weight"
-        mapping[f"{hf_prefix}.post_attention_layernorm.weight"] = f"{our_prefix}.ffn_norm.weight"
-
-    # Final norm and LM head
-    mapping["model.language_model.norm.weight"] = "language_model.norm.weight"
+    from .weight_mappings import build_llm_weight_mapping
+    llm_mapping = build_llm_weight_mapping(
+        config.llm_config.num_layers,
+        hf_prefix="model.language_model",
+        our_prefix="language_model",
+    )
+    mapping.update(llm_mapping)
     mapping["lm_head.weight"] = "language_model.lm_head.weight"
 
     return mapping
@@ -369,7 +344,7 @@ def load_llava_weights(
     # Fallback: load full HF model (2x memory but works for any source)
     hf_model = LlavaForConditionalGeneration.from_pretrained(
         hf_model_path,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
         low_cpu_mem_usage=True,
         trust_remote_code=trust_remote_code,
         local_files_only=local_files_only,
@@ -484,7 +459,7 @@ def download_llava_model(
     # Download model
     hf_model = LlavaForConditionalGeneration.from_pretrained(
         hf_name,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
         low_cpu_mem_usage=True,
         trust_remote_code=trust_remote_code,
     )

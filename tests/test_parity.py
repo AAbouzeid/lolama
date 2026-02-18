@@ -13,6 +13,7 @@ from lolama.model.config import LlamaConfig
 from lolama.model.llama import Llama
 from lolama.model.generator import TextGenerator
 from lolama.model.generation_config import GenerationConfig
+from lolama.model.quantize import quantize_model_int8
 
 # Tiny model dims — fast on CPU, identical structure to real LLaMA
 _VOCAB = 256
@@ -24,26 +25,9 @@ _HIDDEN_DIM = 172
 _MAX_SEQ_LEN = 64
 _EPS = 1e-6
 
-# Weight mapping: HF key -> lolama key (same as loader.py)
-_WEIGHT_MAP: dict[str, str] = {
-    "model.embed_tokens.weight": "embed_tokens.weight",
-    "model.norm.weight": "norm.weight",
-    "lm_head.weight": "lm_head.weight",
-}
-for _i in range(_NUM_LAYERS):
-    _hf = f"model.layers.{_i}"
-    _our = f"layers.{_i}"
-    _WEIGHT_MAP.update({
-        f"{_hf}.self_attn.q_proj.weight": f"{_our}.attention.q_proj.weight",
-        f"{_hf}.self_attn.k_proj.weight": f"{_our}.attention.k_proj.weight",
-        f"{_hf}.self_attn.v_proj.weight": f"{_our}.attention.v_proj.weight",
-        f"{_hf}.self_attn.o_proj.weight": f"{_our}.attention.o_proj.weight",
-        f"{_hf}.mlp.gate_proj.weight": f"{_our}.feed_forward.w_gate.weight",
-        f"{_hf}.mlp.up_proj.weight": f"{_our}.feed_forward.w_up.weight",
-        f"{_hf}.mlp.down_proj.weight": f"{_our}.feed_forward.w_down.weight",
-        f"{_hf}.input_layernorm.weight": f"{_our}.attention_norm.weight",
-        f"{_hf}.post_attention_layernorm.weight": f"{_our}.ffn_norm.weight",
-    })
+# Weight mapping: HF key -> lolama key (single source of truth)
+from lolama.data.weight_mappings import build_llm_weight_mapping_with_lm_head
+_WEIGHT_MAP: dict[str, str] = build_llm_weight_mapping_with_lm_head(_NUM_LAYERS)
 
 
 @pytest.fixture
@@ -190,3 +174,85 @@ class TestGenerationParity:
             f"  HF:   {hf_tokens}\n"
             f"  Ours: {our_tokens}"
         )
+
+
+# ── Quantized parity ────────────────────────────────────────────────
+
+class TestQuantizedParity:
+    """Quantized lolama models should maintain reasonable parity with
+    the unquantized HF reference. Int8 quantization introduces small errors,
+    so we use relaxed tolerances and check argmax agreement rate.
+    """
+
+    @pytest.fixture
+    def quantized_model(self, our_model):
+        """lolama model after int8 quantization (no outlier detection)."""
+        quantize_model_int8(our_model, skip_layers=["lm_head", "embed_tokens"])
+        our_model.eval()
+        return our_model
+
+    @pytest.fixture
+    def quantized_model_outlier(self, hf_model):
+        """lolama model after int8 quantization with outlier detection."""
+        config = LlamaConfig(
+            vocab_size=_VOCAB, d_model=_D_MODEL, num_heads=_NUM_HEADS,
+            num_kv_heads=_NUM_KV_HEADS, num_layers=_NUM_LAYERS,
+            hidden_dim=_HIDDEN_DIM, max_seq_len=_MAX_SEQ_LEN, eps=_EPS,
+        )
+        model = Llama(config, init_weights=False)
+        hf_state = hf_model.state_dict()
+        new_state = {our_key: hf_state[hf_key] for hf_key, our_key in _WEIGHT_MAP.items()}
+        model.load_state_dict(new_state, strict=False)
+        quantize_model_int8(model, skip_layers=["lm_head", "embed_tokens"],
+                            outlier_threshold=3.0)
+        model.eval()
+        return model
+
+    def test_quantized_logits_bounded_error(self, hf_model, quantized_model):
+        """Quantized logits should have bounded relative error vs HF."""
+        ids = torch.tensor([[10, 20, 30, 40, 50]])
+        with torch.no_grad():
+            hf_out = hf_model(ids).logits
+            q_out = quantized_model(ids)
+
+        rel_error = (hf_out - q_out).abs().mean() / hf_out.abs().mean()
+        assert rel_error < 0.10, f"Relative error {rel_error:.4f} exceeds 10%"
+
+    def test_quantized_argmax_agreement(self, hf_model, quantized_model):
+        """Top-1 predictions should agree on most positions."""
+        ids = torch.tensor([[5, 15, 25, 35, 45, 55]])
+        with torch.no_grad():
+            hf_top1 = hf_model(ids).logits.argmax(dim=-1)
+            q_top1 = quantized_model(ids).argmax(dim=-1)
+
+        agreement = (hf_top1 == q_top1).float().mean().item()
+        assert agreement >= 0.5, (
+            f"Argmax agreement {agreement:.0%} below 50%.\n"
+            f"  HF:   {hf_top1.tolist()}\n"
+            f"  Ours: {q_top1.tolist()}"
+        )
+
+    def test_quantized_generation_reasonable(self, quantized_model):
+        """Quantized greedy generation should produce valid (non-degenerate) output."""
+        ids = torch.tensor([[10, 20, 30, 40, 50]])
+        gen = TextGenerator(quantized_model)
+        config = GenerationConfig.greedy(max_new_tokens=10)
+        output = gen.generate(ids, config)
+        generated = output[0, ids.shape[1]:].tolist()
+
+        # Should generate exactly max_new_tokens (or stop at EOS)
+        assert len(generated) > 0, "No tokens generated"
+        # Should not degenerate into repeating a single token
+        assert len(set(generated)) > 1 or len(generated) <= 2, (
+            f"Degenerate output: {generated}"
+        )
+
+    def test_outlier_quantized_logits_bounded(self, hf_model, quantized_model_outlier):
+        """Outlier-aware quantized logits should have bounded error vs HF."""
+        ids = torch.tensor([[10, 20, 30, 40, 50]])
+        with torch.no_grad():
+            hf_out = hf_model(ids).logits
+            q_out = quantized_model_outlier(ids)
+
+        rel_error = (hf_out - q_out).abs().mean() / hf_out.abs().mean()
+        assert rel_error < 0.10, f"Outlier-aware relative error {rel_error:.4f} exceeds 10%"
