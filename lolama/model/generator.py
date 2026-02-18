@@ -65,6 +65,15 @@ class TextGenerator:
     def config(self):
         """Get the model config."""
         return self.model.config
+
+    @property
+    def max_seq_len(self) -> int:
+        """Maximum sequence length from model config (0 if unknown)."""
+        cfg = self.config
+        return (
+            getattr(cfg, 'max_seq_len', 0)
+            or getattr(getattr(cfg, 'llm_config', None), 'max_seq_len', 0)
+        )
     
     @torch.inference_mode()
     def generate(
@@ -116,8 +125,7 @@ class TextGenerator:
         max_len: int = prompt_len + config.max_new_tokens
 
         # Validate total length fits within model's context window
-        model_config = self.config
-        max_seq_len: int = getattr(model_config, 'max_seq_len', 0) or getattr(getattr(model_config, 'llm_config', None), 'max_seq_len', 0)
+        max_seq_len: int = self.max_seq_len
         if max_seq_len > 0 and max_len > max_seq_len:
             raise ValueError(
                 f"prompt_len ({prompt_len}) + max_new_tokens ({config.max_new_tokens}) = {max_len} "
@@ -197,7 +205,7 @@ class TextGenerator:
                 logits = self.model(next_token, kv_caches=kv_caches, attention_mask=decode_mask)
 
         return all_ids[:, :current_len]
-    
+
     @torch.inference_mode()
     def generate_stream(
         self,
@@ -235,8 +243,7 @@ class TextGenerator:
         max_len: int = prompt_len + config.max_new_tokens
 
         # Validate total length fits within model's context window
-        model_config = self.config
-        max_seq_len: int = getattr(model_config, 'max_seq_len', 0) or getattr(getattr(model_config, 'llm_config', None), 'max_seq_len', 0)
+        max_seq_len: int = self.max_seq_len
         if max_seq_len > 0 and max_len > max_seq_len:
             raise ValueError(
                 f"prompt_len ({prompt_len}) + max_new_tokens ({config.max_new_tokens}) = {max_len} "
@@ -310,15 +317,14 @@ class TextGenerator:
             if config.eos_token_id is not None and token_id == config.eos_token_id:
                 break
 
-            # Yield before dispatching next forward pass so generator
-            # cancellation (close/throw) doesn't leave KV cache in an
-            # inconsistent state from an already-issued forward pass.
-            yield token_id
-
-            # Skip forward pass on last iteration (its logits would be unused)
+            # Queue next forward pass BEFORE yielding so the GPU stays
+            # busy while the consumer processes the token (important on MPS).
+            # Skip on last iteration (its logits would be unused).
             if i < config.max_new_tokens - 1:
                 decode_mask: torch.Tensor | None = all_mask[:, :current_len] if all_mask is not None else None
                 logits = self.model(next_token, kv_caches=kv_caches, attention_mask=decode_mask)
+
+            yield token_id
     
     @torch.inference_mode()
     def generate_batch(
@@ -351,8 +357,7 @@ class TextGenerator:
         max_total_len: int = max_prompt_len + config.max_new_tokens
 
         # Validate total length fits within model's context window
-        model_config = self.config
-        max_seq_len: int = getattr(model_config, 'max_seq_len', 0) or getattr(getattr(model_config, 'llm_config', None), 'max_seq_len', 0)
+        max_seq_len: int = self.max_seq_len
         if max_seq_len > 0 and max_total_len > max_seq_len:
             raise ValueError(
                 f"max_prompt_len ({max_prompt_len}) + max_new_tokens ({config.max_new_tokens}) = {max_total_len} "
@@ -411,6 +416,11 @@ class TextGenerator:
 
         # Generation loop
         generated_tokens: list[list[int]] = [[] for _ in range(batch_size)]
+        # Pre-allocate pad vector once (used to mask finished sequences each step)
+        pad_token_vec: torch.Tensor = torch.full(
+            (batch_size, 1), config.pad_token_id,
+            dtype=padded_prompts[0].dtype, device=device,
+        )
 
         for i in range(config.max_new_tokens):
             next_logits: torch.Tensor = logits[:, -1, :]
@@ -429,7 +439,7 @@ class TextGenerator:
             if finished.any():
                 next_token = torch.where(
                     finished.unsqueeze(-1),
-                    torch.full_like(next_token, config.pad_token_id),
+                    pad_token_vec,
                     next_token,
                 )
 

@@ -638,7 +638,8 @@ def load_quantized_model(
     uses assign=True to avoid redundant CPU allocation.
 
     On CPU, automatically pre-dequantizes and caches weights to avoid
-    repeated per-forward dequantization overhead.
+    repeated per-forward dequantization overhead. This roughly doubles
+    memory usage (int8 weights + cached fp32 copies remain resident).
 
     Note: The model architecture must already have QuantizedLinear layers.
     Call apply_quantization_structure() first to set up the module tree.

@@ -40,7 +40,10 @@ def _load_extension():
         ext_dir = os.path.dirname(os.path.abspath(__file__))
         source = os.path.join(ext_dir, "metal_ext.cpp")
 
-        # Include source hash in name so edits bust the JIT cache
+        # Include source hash in name so edits bust the JIT cache.
+        # NOTE: old compiled .so files accumulate in the torch JIT cache
+        # directory (~/.cache/torch_extensions/) and are never cleaned up.
+        # Run `torch.utils.cpp_extension._get_build_directory()` to locate them.
         src_hash = _source_hash(source)
         ext_name = f"lolama_metal_ext_{src_hash}"
 

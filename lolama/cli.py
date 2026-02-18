@@ -201,12 +201,10 @@ def _setup_responder(args: argparse.Namespace):
     logger.info("Creating text generator...")
     generator = TextGenerator(model)
 
-    # Resolve max context length once for validation
-    _model_config = generator.config
-    _max_ctx: int = (
-        getattr(_model_config, 'max_seq_len', 0)
-        or getattr(getattr(_model_config, 'llm_config', None), 'max_seq_len', 0)
-    )
+    # Resolve max context length once for early validation (the generator
+    # also validates prompt + max_new_tokens, but this catches overlong
+    # prompts before we even build a GenerationConfig).
+    _max_ctx: int = generator.max_seq_len
 
     def tokenize_prompt(prompt: str) -> torch.Tensor:
         # For VLMs, ensure <image> token is in the prompt
